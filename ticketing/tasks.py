@@ -1,6 +1,7 @@
 """Task functions that create and resolve ServiceNow incidents. Invoked via django_q async_task.
 
-Implemented: create_hpc_account_ticket, resolve_allocation_change_ticket.
+Implemented: create_hpc_account_ticket, create_allocation_change_ticket,
+resolve_allocation_change_ticket.
 
 NOT YET IMPLEMENTED -- the allocation tasks, invoked from ticketing.signals. Four of them: create
 and resolve an allocation incident; create and resolve a change-request incident. The two resolve
@@ -48,7 +49,7 @@ from coldfront.core.utils.common import import_from_settings
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
 
-from ticketing.allocation_updates import UnsupportedUpdate, describe_change
+from ticketing.allocation_updates import UnsupportedUpdate, describe_change, describe_request
 from ticketing.client import Incident, client_from_settings
 from ticketing.tickets import Ticket
 
@@ -117,6 +118,62 @@ def contact_type_for(user, project) -> str:
     return CONTACT_TYPE_SELF_SERVICE if is_manager else CONTACT_TYPE_EMAIL
 
 
+def _change_correlation_id(change) -> str:
+    """Shared by the create and resolve tasks, so resolve finds the incident create opened."""
+    return f"coldfront:allocation-change:{change.pk}"
+
+
+def _people_fields(project, requestor_pk):
+    """The requestor, and the Ticket people fields for a request about `project`.
+
+    Without `requestor_pk` (the signals don't carry it until the companion core change lands), the
+    PI stands in. The PI is watch-listed when someone else asked.
+    """
+    requestor = get_user_model().objects.get(pk=requestor_pk) if requestor_pk else project.pi
+    fields = {
+        "u_contact_person": requestor.username,
+        "caller_id": requestor.username,
+        "watch_list": [project.pi.username] if project.pi_id != requestor.pk else None,
+        "contact_type": contact_type_for(requestor, project),
+    }
+    return requestor, fields
+
+
+def create_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident:
+    """Open an incident for a newly submitted allocation change request.
+
+    Every change request gets one, supported or not (see describe_request); only supported changes
+    are later resolved automatically by resolve_allocation_change_ticket, which finds this incident
+    by the shared correlation_id. Opened with no state, so the instance starts it Active. Safe to
+    re-run: an incident already filed for the change is returned instead of filing another.
+    """
+    change = AllocationChangeRequest.objects.select_related("allocation__project__pi").get(pk=allocation_change_pk)
+    correlation_id = _change_correlation_id(change)
+    client = client_from_settings()
+
+    existing = client.find_incident(correlation_id)
+    if existing:
+        logger.info("Incident for allocation change %s already filed as %s", change.pk, existing.number)
+        return existing
+
+    project = change.allocation.project
+    requestor, people = _people_fields(project, requestor_pk)
+    request = describe_request(change, requestor)
+    business_service = {"u_business_service": request.business_service} if request.business_service else {}
+    ticket = Ticket(
+        **people,
+        short_description=request.short_description,
+        description=request.description,
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
+        correlation_id=correlation_id,
+        **business_service,
+    )
+    incident = client.create_incident(ticket)
+    logger.info("Filed %s for allocation change %s", incident.number, change.pk)
+    return incident
+
+
 def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident | None:
     """Tell the requester their approved allocation change has been made, and close out its ticket.
 
@@ -144,7 +201,7 @@ def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: in
         "close_notes": update.close_notes,
         "comments": update.comments,
     }
-    correlation_id = f"coldfront:allocation-change:{change.pk}"
+    correlation_id = _change_correlation_id(change)
     client = client_from_settings()
 
     existing = client.find_incident(correlation_id)
@@ -156,13 +213,9 @@ def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: in
             logger.info("Resolved %s for allocation change %s", existing.number, change.pk)
         return existing
 
-    project = change.allocation.project
-    requestor = get_user_model().objects.get(pk=requestor_pk) if requestor_pk else project.pi
+    _, people = _people_fields(change.allocation.project, requestor_pk)
     ticket = Ticket(
-        u_contact_person=requestor.username,
-        caller_id=requestor.username,
-        watch_list=[project.pi.username] if project.pi_id != requestor.pk else None,
-        contact_type=contact_type_for(requestor, project),
+        **people,
         short_description=update.short_description,
         u_business_service=update.business_service,
         u_action=U_ACTION_MOVE_ADD_CHANGE,

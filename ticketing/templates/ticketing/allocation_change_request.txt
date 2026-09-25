@@ -1,0 +1,17 @@
+{% autoescape off %}Allocation change requested in ColdFront.
+
+Project:      {{ project.title }}
+PI:           {{ pi.get_full_name|default:pi.username }} ({{ pi.username }})
+Requested by: {{ requestor.get_full_name|default:requestor.username }} ({{ requestor.username }})
+Resource:     {% if resource %}{{ resource.name }}{% else %}(none){% endif %}{% if path %}
+Path:         {{ path }}{% endif %}
+
+Requested changes:
+{% for c in attribute_changes %}- {{ c.name }}: {{ c.current }} -> {{ c.requested }}
+{% endfor %}{% if change.end_date_extension %}- End date extension: {{ change.end_date_extension }} days
+{% endif %}{% if not attribute_changes and not change.end_date_extension %}- (none listed)
+{% endif %}
+Justification:
+{{ change.justification }}
+
+Review in ColdFront: {{ url }}{% endautoescape %}

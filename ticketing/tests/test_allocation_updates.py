@@ -1,5 +1,6 @@
 import pytest
 from coldfront.core.test_helpers import factories as f
+from django.urls import reverse
 
 from ticketing import tasks
 from ticketing.allocation_updates import UnsupportedUpdate, describe_change
@@ -182,3 +183,98 @@ def test_contact_type_superuser_on_someone_elses_project_is_email(pi, django_use
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
     assert tasks.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
+
+
+# -- create_allocation_change_ticket -----------------------------------------------------------
+
+
+class FakeServiceNow:
+    """Remembers incidents by correlation_id, so a create -> resolve lifecycle can be followed."""
+
+    def __init__(self):
+        self.incidents = {}  # correlation_id -> (Incident, fields)
+
+    def find_incident(self, correlation_id):
+        found = self.incidents.get(correlation_id)
+        return found[0] if found else None
+
+    def create_incident(self, ticket):
+        n = len(self.incidents) + 1
+        incident = Incident(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
+        self.incidents[ticket.correlation_id] = (incident, vars(ticket).copy())
+        return incident
+
+    def update_incident(self, sys_id, fields):
+        for cid, (incident, stored) in self.incidents.items():
+            if incident.sys_id == sys_id:
+                stored.update(fields)
+                self.incidents[cid] = (
+                    Incident(sys_id, incident.number, state=fields.get("state", incident.state)),
+                    stored,
+                )
+
+
+def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
+    change = make_storage_change(pi, new="20")
+    # At request time the attribute still holds the current value.
+    quota = change.allocationattributechangerequest_set.get().allocation_attribute
+    quota.value = "10"
+    quota.save()
+    snow = use_client(FakeServiceNow())
+
+    incident = tasks.create_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
+
+    _, ticket = snow.incidents[f"coldfront:allocation-change:{change.pk}"]
+    assert incident.number == "INC0000001"
+    assert ticket["state"] is None  # left for the instance to open as Active
+    assert ticket["short_description"] == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
+    assert ticket["caller_id"] == "jdoe01" and ticket["watch_list"] == ["asmith02"]
+    assert ticket["u_business_service"] == "Research Data Storage"
+    assert ticket["u_action"] == "Move/Add/Change"
+    description = ticket["description"]
+    assert "- Storage Quota (TB): 10 -> 20" in description
+    assert "Requested by: jdoe01 (jdoe01)" in description
+    assert change.justification in description
+    assert f"Review in ColdFront: {reverse('allocation-change-detail', kwargs={'pk': change.pk})}" in description
+
+
+def test_request_rerun_returns_the_existing_incident(pi, use_client):
+    change = make_storage_change(pi)
+    snow = use_client(FakeServiceNow())
+
+    first = tasks.create_allocation_change_ticket(change.pk)
+    assert tasks.create_allocation_change_ticket(change.pk) == first
+    assert len(snow.incidents) == 1
+
+
+def test_unsupported_change_still_gets_a_request_ticket(pi, use_client):
+    change = make_storage_change(pi)
+    change.allocationattributechangerequest_set.all().delete()
+    change.end_date_extension = 90
+    change.save()
+    snow = use_client(FakeServiceNow())
+
+    tasks.create_allocation_change_ticket(change.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert (
+        ticket["short_description"]
+        == f"Research Storage: Allocation Change Request | {change.allocation.project.title}"
+    )
+    assert "- End date extension: 90 days" in ticket["description"]
+
+
+def test_request_then_approval_resolves_the_same_incident(pi, requestor, use_client):
+    change = make_storage_change(pi)
+    snow = use_client(FakeServiceNow())
+
+    opened = tasks.create_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
+    resolved = tasks.resolve_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
+
+    assert resolved == opened
+    assert len(snow.incidents) == 1
+    [(incident, fields)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert fields["close_code"] == "Solved Remotely (Permanently)"
+    assert "to 20 TB has been applied" in fields["comments"]
+    assert "Quota Change Request" in fields["short_description"]  # the request's, not overwritten
