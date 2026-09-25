@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coldfront-ticketing"
+version = "0.1.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Chris Barnett" }
+]
+description = "Coldfront Ticketing Plugin"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["high-performance-computing", "resource-allocation"]
+classifiers = [
+    'Programming Language :: Python :: 3',
+    'Framework :: Django :: 6.0',
+    'Topic :: Scientific/Engineering',
+    'Topic :: System :: Systems Administration',
+    'Topic :: Internet :: WWW/HTTP :: WSGI :: Application',
+]
+dependencies = [
+    "coldfront",
+    "coldfront_utils@git+https://github.com/Tufts-Technology-Services/coldfront-utils.git",
+]
+# NOTE: pydantic is deliberately absent pending the vendored-Ticket decision (see CLAUDE.md,
+# "Open decisions"). Add it only if Ticket keeps its pydantic model rather than becoming a dataclass.
+
+[project.urls]
+"Source Code" = "https://github.com/Tufts-Technology-Services/coldfront-ticketing"
+
+[dependency-groups]
+dev = [
+    "pytest-django>=4.11.1",
+    "factory-boy>=3.3.3",
+    "ruff>=0.11.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["ticketing"]
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+]
+
+[tool.ruff.format]
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "ticketing.tests.settings"
+python_files = ["test_*.py"]
