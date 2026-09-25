@@ -8,9 +8,24 @@ carrying a `PARSE_START` / `PARSE_END` field block that the ticket system parses
 
 ## Status
 
-**Scaffold only — not yet implemented.** The structure, conventions, and design are settled; the
-receiver, task, and ticket-building code are stubs. See `docs/plan.md` for the full design and
-`CLAUDE.md` for project orientation, including two decisions still open.
+**Early.** `ticketing/tickets.py` — the `Ticket` model and parse-header builder — is implemented and
+covered by tests. The signal receivers (`signals.py`) and tasks (`tasks.py`) are still stubs that
+document what belongs in them.
+
+See `docs/plan.md` for the full design and `CLAUDE.md` for project orientation.
+
+`tickets.py` has no Django or ColdFront imports, so its tests run standalone:
+
+```sh
+python3 -c "
+from ticketing.tests import test_tickets as t
+[getattr(t, n)() for n in dir(t) if n.startswith('test_')]
+print('ok')
+"
+```
+
+The rest of the suite needs ColdFront installed (`ticketing/tests/settings.py` layers on ColdFront's
+own settings), then `pytest`.
 
 ## Events covered
 

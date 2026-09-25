@@ -10,21 +10,21 @@ from coldfront.config.settings import *  # noqa: F403
 
 # The plugin is not in coldfront's own INSTALLED_APPS; a real deployment adds it
 # the way README.md describes.
-INSTALLED_APPS = [*INSTALLED_APPS, 'ticketing']  # noqa: F405
+INSTALLED_APPS = [*INSTALLED_APPS, "ticketing"]  # noqa: F405
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
     }
 }
 
 # Settings the plugin reads that coldfront itself does not define.
 TICKETING_ENABLE_SIGNALS = True
-TICKETING_ASSIGNED_TO = 'svc_test'
+TICKETING_ASSIGNED_TO = "svc_test"
 
 # Keep tests fast and hermetic.
 DEBUG = False
-PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
-EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
-Q_CLUSTER = {**globals().get('Q_CLUSTER', {}), 'sync': True}
+PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+Q_CLUSTER = {**globals().get("Q_CLUSTER", {}), "sync": True}

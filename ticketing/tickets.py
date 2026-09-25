@@ -1,35 +1,77 @@
 """Ticket model and PARSE_START/PARSE_END header builder.
 
-NOT YET IMPLEMENTED. Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ so
-the two stay diffable. Copy models.Ticket and utils.create_parse_header; drop generate_text and its
-Jinja2 PackageLoader (bodies are Django templates here), drop create_ticket_header (it hardcodes the
-resolved-ticket defaults), and drop hpc_tickets.py entirely -- none of its builders match our events.
-
-The header is a block of `key:value` lines between PARSE_START and PARSE_END, prepended to a
-plain-text body, which the ticket system parses into fields. Despite the source library's name the
-fields are ServiceNow's.
-
-Three adaptations, all detailed in docs/plan.md:
-
-1. Allow unresolved tickets. The original defaults to state='Resolved' /
-   close_code='Resolved Remotely' and requires close_notes, because its existing callers file
-   audit-trail tickets after automation already did the work. Three of our four events are pending
-   requests and must open a ticket, not close one -- so state, close_code and close_notes become
-   optional and settable.
-
-2. Fix optional/list serialization. The original serializes a plain model_dump(), which emits
-   `parent:None` when unset and `watch_list:['utln']` (a Python list repr) when set. Use
-   exclude_none=True and join list values into a delimited string. This matters more once
-   state/close_code are optional, since they would otherwise serialize as `state:None`.
-
-3. Sanitize free text. Lines are `key:value` joined by newlines and the original only strips outer
-   whitespace, so user-controlled text (project title, justification, PI name) containing a newline
-   breaks the block -- and text containing `\\nstate:Resolved` injects a field outright. Collapse
-   whitespace and truncate anything reaching a header field.
-
-OPEN DECISION: whether Ticket stays a pydantic model or becomes a dataclass. pydantic is not
-currently a ColdFront dependency, and the only pydantic features in use are extra='forbid' (a
-dataclass gives the equivalent via TypeError on unknown kwargs) and str_strip_whitespace=True
-(superseded by adaptation 3), so a dataclass would drop the dependency at no real loss. Resolve
-before writing this module; pyproject.toml currently declares no pydantic dependency.
+Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and CLAUDE.md explains
+what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
 """
+
+import re
+from dataclasses import asdict, dataclass
+
+SHORT_DESCRIPTION_MAX_LENGTH = 160
+LIST_DELIMITER = ","
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+@dataclass(kw_only=True)
+class Ticket:
+    """Fields the ticket system parses out of the header block.
+
+    state/close_code/close_notes are resolution fields: leave them unset to open a ticket, set them
+    to file one that is already resolved.
+
+    Declared in the original library's field order, which kw_only makes possible despite the
+    required fields being interleaved with defaulted ones.
+    """
+
+    u_incident_type: str = "Request"
+    u_contact_person: str
+    caller_id: str
+    source: str = "Email"
+    category: str = "Research"
+    subcategory: str = "Research Systems"
+    u_business_service: str = "High Performance Computing (HPC)"
+    short_description: str
+    assigned_to: str
+    assignment_group: str = "TTS Research Technology"
+    parent: str | None = None
+    watch_list: list[str] | None = None
+    u_action: str = "Activate/Setup/Install"
+    state: str | None = None
+    close_code: str | None = None
+    close_notes: str | None = None
+
+
+def _clean(value) -> str:
+    """Collapse all whitespace to single spaces.
+
+    Header lines are `key:value` joined by newlines, so a value containing a newline would split
+    into a bogus line -- or inject a field outright (`\\nstate:Resolved`). Values reaching here
+    include user-supplied text such as project titles and justifications. Colons are left alone:
+    the parser splits on the first one, and existing ticket titles legitimately contain them.
+    """
+    return _WHITESPACE.sub(" ", str(value)).strip()
+
+
+def create_parse_header(ticket: Ticket) -> str:
+    """Render the ticket as a PARSE_START/PARSE_END block to prepend to an email body."""
+    lines = []
+    for key, value in asdict(ticket).items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = LIST_DELIMITER.join(_clean(item) for item in value if _clean(item))
+            if not value:
+                continue
+        else:
+            value = _clean(value)
+        if key == "short_description":
+            value = value[:SHORT_DESCRIPTION_MAX_LENGTH]
+        lines.append(f"{key}:{value}")
+
+    return """
+PARSE_START
+{0}
+PARSE_END
+
+""".format("\n".join(lines))

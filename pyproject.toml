@@ -25,8 +25,7 @@ dependencies = [
     "coldfront",
     "coldfront_utils@git+https://github.com/Tufts-Technology-Services/coldfront-utils.git",
 ]
-# NOTE: pydantic is deliberately absent pending the vendored-Ticket decision (see CLAUDE.md,
-# "Open decisions"). Add it only if Ticket keeps its pydantic model rather than becoming a dataclass.
+# No pydantic: the vendored Ticket is a stdlib dataclass. See CLAUDE.md, "Ticket format".
 
 [project.urls]
 "Source Code" = "https://github.com/Tufts-Technology-Services/coldfront-ticketing"
@@ -45,6 +44,8 @@ packages = ["ticketing"]
 line-length = 120
 indent-width = 4
 target-version = "py312"
+# docs/reference holds verbatim upstream copies; reformatting them would defeat the point.
+extend-exclude = ["docs/reference"]
 
 [tool.ruff.lint]
 select = [
