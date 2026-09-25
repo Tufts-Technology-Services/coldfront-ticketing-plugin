@@ -1,0 +1,11 @@
+{% autoescape off %}Hello,
+
+Your new allocation on {{ resource.name }} for project {{ project.title }} is now active.{% if quota %}
+Quota: {{ quota }}{% endif %}{% if path %}
+Path:  {{ path }}{% endif %}
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

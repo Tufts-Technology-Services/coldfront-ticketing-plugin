@@ -1,17 +1,21 @@
-"""What allocation change-request tickets say, by what kind of allocation is being changed.
+"""What allocation tickets say, by what kind of allocation it is.
 
-Two moments: describe_request() for the incident opened when a change is requested (admin-facing,
-covers every change request), and describe_change() for the message posted when an approved change
-has been made (customer-facing, supported changes only).
+Two lifecycles, each with two moments:
 
-describe_change() dispatches on the allocation's resource type (only "Storage" today). Within a
-type, the customer message is the first template that exists of:
+    new allocation   describe_new_allocation()  opened on request   admin-facing, every allocation
+                     describe_activation()      resolved on active  customer-facing, supported types
+    change request   describe_request()         opened on request   admin-facing, every change
+                     describe_change()          resolved on approve customer-facing, supported changes
 
-    ticketing/allocation_update/<resource name>.txt
-    ticketing/allocation_update/<resource type>.txt
+The customer-facing side dispatches on the allocation's resource type (only "Storage" today), and
+the message is the first template that exists of
 
-(names slugified), so a resource that needs its own wording -- e.g. HPC vs RStore storage -- gets a
-template named after it, and every other resource of that type falls back to the type's template.
+    ticketing/<folder>/<resource name>.txt
+    ticketing/<folder>/<resource type>.txt
+
+(names slugified; folder allocation_new/ or allocation_update/). So a resource that needs its own
+wording -- e.g. HPC vs RStore storage -- gets a template named after it, and every other resource of
+that type falls back to the type's template.
 """
 
 from dataclasses import dataclass
@@ -36,7 +40,7 @@ BUSINESS_SERVICE_BY_RESOURCE_TYPE = {
 
 
 class UnsupportedUpdate(Exception):
-    """The change request isn't one this plugin writes a ticket for."""
+    """The allocation or change isn't one this plugin writes a customer message for."""
 
 
 @dataclass(frozen=True)
@@ -48,13 +52,51 @@ class AllocationUpdate:
 
 
 @dataclass(frozen=True)
-class ChangeRequestDescription:
+class RequestDescription:
     short_description: str
     description: str  # admin-facing summary of what was asked for
     business_service: str | None  # None: leave the Ticket default
 
 
-def describe_request(change, requestor) -> ChangeRequestDescription:
+def describe_new_allocation(allocation, requestor) -> RequestDescription:
+    """The incident content for a newly requested Allocation -- every one, supported or not."""
+    resource = allocation.get_parent_resource
+    resource_type = resource.resource_type.name if resource else None
+    attributes = [
+        {"name": a.allocation_attribute_type.name, "value": a.value}
+        for a in allocation.allocationattribute_set.select_related("allocation_attribute_type")
+    ]
+    quota = allocation.get_attribute(QUOTA_ATTRIBUTE_NAME)
+
+    label = resource.name if resource else f"Allocation {allocation.pk}"
+    summary = "New Allocation Request"
+    if resource_type == "Storage" and quota is not None:
+        summary += f" | {quota} {QUOTA_UNITS}"
+    summary += f" | {allocation.project.title}"
+
+    context = {
+        "allocation": allocation,
+        "project": allocation.project,
+        "pi": allocation.project.pi,
+        "requestor": requestor,
+        "resource": resource,
+        "attributes": attributes,
+        "url": build_link(reverse("allocation-detail", kwargs={"pk": allocation.pk})),
+    }
+    return RequestDescription(
+        short_description=clean_short_description(f"{label}: {summary}"),
+        description=render_to_string("ticketing/allocation_request.txt", context),
+        business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE.get(resource_type),
+    )
+
+
+def describe_activation(allocation) -> AllocationUpdate:
+    """The customer message for a newly activated Allocation; raises UnsupportedUpdate."""
+    resource = _supported_resource(allocation, _ACTIVATION_BY_RESOURCE_TYPE)
+    return _ACTIVATION_BY_RESOURCE_TYPE[resource.resource_type.name](allocation, resource)
+
+
+def describe_request(change, requestor) -> RequestDescription:
     """The incident content for a newly submitted AllocationChangeRequest.
 
     Covers every change request, supported or not: once core's ticket emails are gated off, this is
@@ -94,7 +136,7 @@ def describe_request(change, requestor) -> ChangeRequestDescription:
         "attribute_changes": attribute_changes,
         "url": build_link(reverse("allocation-change-detail", kwargs={"pk": change.pk})),
     }
-    return ChangeRequestDescription(
+    return RequestDescription(
         short_description=clean_short_description(f"{label}: {summary}"),
         description=render_to_string("ticketing/allocation_change_request.txt", context),
         business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE.get(resource_type),
@@ -102,21 +144,24 @@ def describe_request(change, requestor) -> ChangeRequestDescription:
 
 
 def describe_change(change) -> AllocationUpdate:
-    """The ticket content for an approved AllocationChangeRequest; raises UnsupportedUpdate."""
-    resource = change.allocation.get_parent_resource
+    """The customer message for an approved AllocationChangeRequest; raises UnsupportedUpdate."""
+    resource = _supported_resource(change.allocation, _CHANGE_BY_RESOURCE_TYPE)
+    return _CHANGE_BY_RESOURCE_TYPE[resource.resource_type.name](change, resource)
+
+
+def _supported_resource(allocation, handlers):
+    resource = allocation.get_parent_resource
     if resource is None:
-        raise UnsupportedUpdate(f"Allocation {change.allocation.pk} has no resource")
-    resource_type = resource.resource_type.name
-    describe = _BY_RESOURCE_TYPE.get(resource_type)
-    if describe is None:
-        raise UnsupportedUpdate(f"No update ticket for resource type {resource_type!r}")
-    return describe(change, resource)
+        raise UnsupportedUpdate(f"Allocation {allocation.pk} has no resource")
+    if resource.resource_type.name not in handlers:
+        raise UnsupportedUpdate(f"No customer message for resource type {resource.resource_type.name!r}")
+    return resource
 
 
-def _render(resource, context) -> str:
+def _render(folder, resource, context) -> str:
     names = [
-        f"ticketing/allocation_update/{slugify(resource.name)}.txt",
-        f"ticketing/allocation_update/{slugify(resource.resource_type.name)}.txt",
+        f"ticketing/{folder}/{slugify(resource.name)}.txt",
+        f"ticketing/{folder}/{slugify(resource.resource_type.name)}.txt",
     ]
     return render_to_string(names, context)
 
@@ -155,12 +200,36 @@ def _storage(change, resource) -> AllocationUpdate:
     }
     return AllocationUpdate(
         short_description=f"{resource.name}: Quota Change | {new_quota} | {path}",
-        comments=_render(resource, context),
+        comments=_render("allocation_update", resource, context),
         close_notes="Quota updated.",
         business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE["Storage"],
     )
 
 
-_BY_RESOURCE_TYPE = {
+def _storage_activation(allocation, resource) -> AllocationUpdate:
+    quota = allocation.get_attribute(QUOTA_ATTRIBUTE_NAME)
+    quota = f"{quota} {QUOTA_UNITS}" if quota is not None else None
+    path = allocation.get_attribute(PATH_ATTRIBUTE_NAME) or ""
+    context = {
+        "allocation": allocation,
+        "project": allocation.project,
+        "resource": resource,
+        "quota": quota,
+        "path": path,
+        "share_name": path,
+    }
+    parts = [f"{resource.name}: New Allocation", quota, path or allocation.project.title]
+    return AllocationUpdate(
+        short_description=clean_short_description(" | ".join(p for p in parts if p)),
+        comments=_render("allocation_new", resource, context),
+        close_notes="Allocation activated.",
+        business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE["Storage"],
+    )
+
+
+_CHANGE_BY_RESOURCE_TYPE = {
     "Storage": _storage,
+}
+_ACTIVATION_BY_RESOURCE_TYPE = {
+    "Storage": _storage_activation,
 }

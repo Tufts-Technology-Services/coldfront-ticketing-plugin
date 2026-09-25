@@ -1,0 +1,15 @@
+{% autoescape off %}New allocation requested in ColdFront.
+
+Project:      {{ project.title }}
+PI:           {{ pi.get_full_name|default:pi.username }} ({{ pi.username }})
+Requested by: {{ requestor.get_full_name|default:requestor.username }} ({{ requestor.username }})
+Resource:     {% if resource %}{{ resource.name }}{% else %}(none){% endif %}
+Quantity:     {{ allocation.quantity }}
+{% if attributes %}
+Attributes:
+{% for a in attributes %}- {{ a.name }}: {{ a.value }}
+{% endfor %}{% endif %}
+Justification:
+{{ allocation.justification }}
+
+Review in ColdFront: {{ url }}{% endautoescape %}

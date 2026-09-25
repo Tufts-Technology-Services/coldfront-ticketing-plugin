@@ -1,55 +1,38 @@
 """Task functions that create and resolve ServiceNow incidents. Invoked via django_q async_task.
 
-Implemented: create_hpc_account_ticket, create_allocation_change_ticket,
-resolve_allocation_change_ticket.
+    task                              for (once triggered)         correlation_id
+    create_hpc_account_ticket         an HPC account is ready      coldfront:hpc-account:<utln>
+    create_allocation_ticket          allocation_new               coldfront:allocation:<pk>
+    resolve_allocation_ticket         allocation_activate          coldfront:allocation:<pk>
+    create_allocation_change_ticket   allocation_change_created    coldfront:allocation-change:<pk>
+    resolve_allocation_change_ticket  allocation_change_approved   coldfront:allocation-change:<pk>
 
-NOT YET IMPLEMENTED -- the allocation tasks, invoked from ticketing.signals. Four of them: create
-and resolve an allocation incident; create and resolve a change-request incident. The two resolve
-tasks can share one implementation, keyed on which mapping to look up.
+Each request lifecycle shares one correlation_id, which is how the resolve task finds the incident
+the create task opened, and how any task that is re-run finds its own earlier work instead of filing
+a duplicate. Nothing is stored locally. Nothing calls these yet: the triggers are deliberately
+deferred (see docs/plan.md).
 
-Create:
-
-1. Re-query by pk. Skip if the local allocation/change-request -> incident mapping (ticketing.models)
-   already has an entry, or if ServiceNow already has an incident with this object's correlation_id
-   (e.g. "coldfront:allocation:<pk>"). The second check covers a task that died between the POST and
-   saving the mapping, so a retried task never opens a duplicate incident.
-
-2. Build a Ticket (ticketing.tickets) with state/close_code unset so the incident opens. People
-   fields are UTLNs, which equal User.username in ColdFront: u_contact_person and caller_id from the
-   requestor, watch_list from project.pi, assigned_to from TICKETING_ASSIGNED_TO. Over the Table API
-   these are reference fields, so they likely need converting to sys_user sys_ids first (open
-   question 3 in docs/plan.md). Truncate short_description; it is single-line. Set contact_type
-   explicitly -- left unset, the instance fills in "phone": "self-service" if the requestor is the
-   project's PI or an active Manager on it, else "email" (a superuser filing on someone's behalf).
-   Check membership directly; project.has_perm() is True for every superuser. See "Choosing
-   contact_type" in docs/plan.md.
-
-3. Render the incident description with django.template.loader.render_to_string from
-   templates/ticketing/. This is where the re-queried detail lands -- allocation attributes,
-   resource, project, quota, dates -- and is the reason the plugin hooks signals at all.
-   coldfront_utils (attribute/attribute.py, util/allocations.py) has the attribute helpers; prefer
-   them over hand-rolled lookups.
-
-4. Create the incident via ticketing.client and store its sys_id and number in the mapping.
-
-Resolve:
-
-1. Look up the stored incident. If there is none (the object predates the plugin, was created
-   outside the request views, or the create task hasn't finished yet), log and return.
-
-2. Update that sys_id with the resolution fields (state, close_code, close_notes) and a
-   customer-facing comment rendered from templates/ticketing/. Omit unset fields: sending null on
-   an update would blank the field in ServiceNow.
+Create tasks (_open_request) file for every request, supported or not, with an admin-facing
+description, and leave state unset so the instance opens the incident Active. Resolve tasks
+(_resolve_or_file) post a customer-facing message chosen by resource (ticketing.allocation_updates)
+as a comment and resolve; unsupported allocations are left open for an admin, and with no incident
+to resolve they file one already resolved.
 """
 
 import logging
 
-from coldfront.core.allocation.models import AllocationChangeRequest
+from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
 from coldfront.core.utils.common import import_from_settings
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
 
-from ticketing.allocation_updates import UnsupportedUpdate, describe_change, describe_request
+from ticketing.allocation_updates import (
+    UnsupportedUpdate,
+    describe_activation,
+    describe_change,
+    describe_new_allocation,
+    describe_request,
+)
 from ticketing.client import Incident, client_from_settings
 from ticketing.tickets import Ticket
 
@@ -63,6 +46,7 @@ CLOSE_CODE_SOLVED_REMOTELY = "Solved Remotely (Permanently)"
 CONTACT_TYPE_SELF_SERVICE = "self-service"
 CONTACT_TYPE_EMAIL = "email"
 U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"
+U_ACTION_ACTIVATE = "Activate/Setup/Install"
 
 
 def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
@@ -118,11 +102,6 @@ def contact_type_for(user, project) -> str:
     return CONTACT_TYPE_SELF_SERVICE if is_manager else CONTACT_TYPE_EMAIL
 
 
-def _change_correlation_id(change) -> str:
-    """Shared by the create and resolve tasks, so resolve finds the incident create opened."""
-    return f"coldfront:allocation-change:{change.pk}"
-
-
 def _people_fields(project, requestor_pk):
     """The requestor, and the Ticket people fields for a request about `project`.
 
@@ -139,60 +118,45 @@ def _people_fields(project, requestor_pk):
     return requestor, fields
 
 
-def create_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident:
-    """Open an incident for a newly submitted allocation change request.
+def _open_request(*, correlation_id, what, project, requestor_pk, describe, u_action) -> Incident:
+    """Open an Active incident for a request, or return the one already filed for it.
 
-    Every change request gets one, supported or not (see describe_request); only supported changes
-    are later resolved automatically by resolve_allocation_change_ticket, which finds this incident
-    by the shared correlation_id. Opened with no state, so the instance starts it Active. Safe to
-    re-run: an incident already filed for the change is returned instead of filing another.
+    `describe(requestor)` returns the RequestDescription; it is only called if a ticket is needed.
     """
-    change = AllocationChangeRequest.objects.select_related("allocation__project__pi").get(pk=allocation_change_pk)
-    correlation_id = _change_correlation_id(change)
     client = client_from_settings()
-
     existing = client.find_incident(correlation_id)
     if existing:
-        logger.info("Incident for allocation change %s already filed as %s", change.pk, existing.number)
+        logger.info("Incident for %s already filed as %s", what, existing.number)
         return existing
 
-    project = change.allocation.project
     requestor, people = _people_fields(project, requestor_pk)
-    request = describe_request(change, requestor)
+    request = describe(requestor)
     business_service = {"u_business_service": request.business_service} if request.business_service else {}
     ticket = Ticket(
         **people,
         short_description=request.short_description,
         description=request.description,
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        u_action=u_action,
         assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
         correlation_id=correlation_id,
         **business_service,
     )
     incident = client.create_incident(ticket)
-    logger.info("Filed %s for allocation change %s", incident.number, change.pk)
+    logger.info("Filed %s for %s", incident.number, what)
     return incident
 
 
-def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident | None:
-    """Tell the requester their approved allocation change has been made, and close out its ticket.
+def _resolve_or_file(*, correlation_id, what, project, requestor_pk, describe, u_action) -> Incident | None:
+    """Resolve the request's incident with a customer message, or file one already resolved.
 
-    What the message says depends on the allocation's resource (ticketing.allocation_updates); only
-    Storage quota changes are supported today. Anything else is logged and left alone, so an open
-    incident stays open for an admin to handle.
-
-    If the change request already has an incident (correlation_id
-    "coldfront:allocation-change:<pk>"), it is resolved with the message as a customer-visible
-    comment -- unless it is already resolved, since re-posting would duplicate the comment in its
-    journal. Otherwise a new, already-resolved incident is filed so the user still hears about it.
-
-    `requestor_pk` is who submitted the change; without it, the project's PI stands in as caller.
+    `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
+    so an open incident stays open for an admin. An incident that is already Resolved or Closed is
+    left alone: `comments` is a journal, so re-posting would duplicate the message.
     """
-    change = AllocationChangeRequest.objects.select_related("allocation__project__pi").get(pk=allocation_change_pk)
     try:
-        update = describe_change(change)
+        update = describe()
     except UnsupportedUpdate as e:
-        logger.info("No ticket for allocation change %s: %s", change.pk, e)
+        logger.info("No customer message for %s: %s", what, e)
         return None
 
     resolution = {
@@ -201,28 +165,116 @@ def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: in
         "close_notes": update.close_notes,
         "comments": update.comments,
     }
-    correlation_id = _change_correlation_id(change)
     client = client_from_settings()
-
     existing = client.find_incident(correlation_id)
     if existing:
         if existing.state in (STATE_RESOLVED, STATE_CLOSED):
-            logger.info("Incident %s for allocation change %s is already resolved", existing.number, change.pk)
+            logger.info("Incident %s for %s is already resolved", existing.number, what)
         else:
             client.update_incident(existing.sys_id, resolution)
-            logger.info("Resolved %s for allocation change %s", existing.number, change.pk)
+            logger.info("Resolved %s for %s", existing.number, what)
         return existing
 
-    _, people = _people_fields(change.allocation.project, requestor_pk)
+    _, people = _people_fields(project, requestor_pk)
     ticket = Ticket(
         **people,
         short_description=update.short_description,
         u_business_service=update.business_service,
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        u_action=u_action,
         assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
         correlation_id=correlation_id,
         **resolution,
     )
     incident = client.create_incident(ticket)
-    logger.info("Filed %s for allocation change %s", incident.number, change.pk)
+    logger.info("Filed %s for %s", incident.number, what)
     return incident
+
+
+# -- New allocations: opened on allocation_new, resolved on allocation_activate ------------------
+
+
+def _allocation(allocation_pk):
+    return Allocation.objects.select_related("project__pi").get(pk=allocation_pk)
+
+
+def create_allocation_ticket(allocation_pk: int, requestor_pk: int | None = None) -> Incident:
+    """Open an incident for a newly requested allocation.
+
+    Every allocation request gets one, supported or not (see describe_new_allocation): once core's
+    ticket emails are gated off it is the only ticket admins get. resolve_allocation_ticket finds it
+    by the shared correlation_id "coldfront:allocation:<pk>". Opened with no state, so the instance
+    starts it Active. Safe to re-run.
+    """
+    allocation = _allocation(allocation_pk)
+    return _open_request(
+        correlation_id=f"coldfront:allocation:{allocation.pk}",
+        what=f"allocation {allocation.pk}",
+        project=allocation.project,
+        requestor_pk=requestor_pk,
+        describe=lambda requestor: describe_new_allocation(allocation, requestor),
+        u_action=U_ACTION_ACTIVATE,
+    )
+
+
+def resolve_allocation_ticket(allocation_pk: int, requestor_pk: int | None = None) -> Incident | None:
+    """Tell the requester their allocation is active, and close out its ticket.
+
+    The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
+    is supported today, and anything else is left open for an admin. With no incident to resolve, a
+    new one is filed already resolved. `requestor_pk` only matters then -- without it the PI is the
+    caller. Safe to re-run.
+    """
+    allocation = _allocation(allocation_pk)
+    return _resolve_or_file(
+        correlation_id=f"coldfront:allocation:{allocation.pk}",
+        what=f"allocation {allocation.pk}",
+        project=allocation.project,
+        requestor_pk=requestor_pk,
+        describe=lambda: describe_activation(allocation),
+        u_action=U_ACTION_ACTIVATE,
+    )
+
+
+# -- Change requests: opened on allocation_change_created, resolved on allocation_change_approved -
+
+
+def _change(allocation_change_pk):
+    return AllocationChangeRequest.objects.select_related("allocation__project__pi").get(pk=allocation_change_pk)
+
+
+def create_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident:
+    """Open an incident for a newly submitted allocation change request.
+
+    Every change request gets one, supported or not (see describe_request); only supported changes
+    are later resolved automatically by resolve_allocation_change_ticket, which finds this incident
+    by the shared correlation_id "coldfront:allocation-change:<pk>". Opened with no state, so the
+    instance starts it Active. Safe to re-run.
+    """
+    change = _change(allocation_change_pk)
+    return _open_request(
+        correlation_id=f"coldfront:allocation-change:{change.pk}",
+        what=f"allocation change {change.pk}",
+        project=change.allocation.project,
+        requestor_pk=requestor_pk,
+        describe=lambda requestor: describe_request(change, requestor),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
+    )
+
+
+def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: int | None = None) -> Incident | None:
+    """Tell the requester their approved allocation change has been made, and close out its ticket.
+
+    The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
+    quota changes are supported today, and anything else is left open for an admin. With no
+    incident to resolve, a new one is filed already resolved. `requestor_pk` only matters then --
+    without it the PI is the caller. Safe to re-run.
+    """
+    change = _change(allocation_change_pk)
+    return _resolve_or_file(
+        correlation_id=f"coldfront:allocation-change:{change.pk}",
+        what=f"allocation change {change.pk}",
+        project=change.allocation.project,
+        requestor_pk=requestor_pk,
+        describe=lambda: describe_change(change),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
+    )

@@ -9,23 +9,30 @@ from ticketing.client import Incident
 pytestmark = pytest.mark.django_db
 
 
-def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="20", path="/cluster/tufts/lab"):
-    """An approved Storage Quota (TB) change: the attribute already holds the new value."""
+def make_storage_allocation(pi, *, resource_name="Research Storage", quota="10", path="/cluster/tufts/lab"):
+    """A Storage allocation with a quota (a Storage Quota (TB) attribute) and a path; returns (allocation, quota)."""
     resource = f.ResourceFactory(name=resource_name, resource_type=f.ResourceTypeFactory(name="Storage"))
     allocation = f.AllocationFactory(project=f.ProjectFactory(pi=pi))
     allocation.resources.add(resource)
-    quota = f.AllocationAttributeFactory(
+    quota_attr = f.AllocationAttributeFactory(
         allocation=allocation,
         allocation_attribute_type=f.AllocationAttributeTypeFactory(name="Storage Quota (TB)"),
-        value=old,
+        value=quota,
     )
-    f.AllocationAttributeFactory(
-        allocation=allocation,
-        allocation_attribute_type=f.AllocationAttributeTypeFactory(
-            name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text")
-        ),
-        value=path,
-    )
+    if path:
+        f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(
+                name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text")
+            ),
+            value=path,
+        )
+    return allocation, quota_attr
+
+
+def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="20", path="/cluster/tufts/lab"):
+    """An approved Storage Quota (TB) change: the attribute already holds the new value."""
+    allocation, quota = make_storage_allocation(pi, resource_name=resource_name, quota=old, path=path)
     change = f.AllocationChangeRequestFactory(allocation=allocation)
     f.AllocationAttributeChangeRequestFactory(
         allocation_change_request=change, allocation_attribute=quota, new_value=new
@@ -33,6 +40,14 @@ def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="
     quota.value = new  # what approval does
     quota.save()
     return change
+
+
+def make_cluster_allocation(pi):
+    """An allocation on a resource type with no customer message (only Storage has one today)."""
+    resource = f.ResourceFactory(name="Research Cluster", resource_type=f.ResourceTypeFactory(name="Cluster"))
+    allocation = f.AllocationFactory(project=f.ProjectFactory(pi=pi))
+    allocation.resources.add(resource)
+    return allocation
 
 
 class FakeClient:
@@ -278,3 +293,93 @@ def test_request_then_approval_resolves_the_same_incident(pi, requestor, use_cli
     assert fields["close_code"] == "Solved Remotely (Permanently)"
     assert "to 20 TB has been applied" in fields["comments"]
     assert "Quota Change Request" in fields["short_description"]  # the request's, not overwritten
+
+
+# -- create_allocation_ticket / resolve_allocation_ticket --------------------------------------
+
+
+def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
+    allocation, _ = make_storage_allocation(pi)
+    snow = use_client(FakeServiceNow())
+
+    incident = tasks.create_allocation_ticket(allocation.pk, requestor_pk=requestor.pk)
+
+    _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
+    assert incident.number == "INC0000001"
+    assert ticket["state"] is None
+    assert ticket["short_description"] == (
+        f"Research Storage: New Allocation Request | 10 TB | {allocation.project.title}"
+    )
+    assert ticket["caller_id"] == "jdoe01" and ticket["watch_list"] == ["asmith02"]
+    assert ticket["u_action"] == "Activate/Setup/Install"
+    assert ticket["u_business_service"] == "Research Data Storage"
+    description = ticket["description"]
+    assert "- Storage Quota (TB): 10" in description
+    assert "- Storage Path: /cluster/tufts/lab" in description
+    assert allocation.justification in description
+    assert f"Review in ColdFront: {reverse('allocation-detail', kwargs={'pk': allocation.pk})}" in description
+
+
+def test_every_new_allocation_gets_a_request_ticket(pi, use_client):
+    allocation = make_cluster_allocation(pi)
+    snow = use_client(FakeServiceNow())
+
+    tasks.create_allocation_ticket(allocation.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["short_description"] == f"Research Cluster: New Allocation Request | {allocation.project.title}"
+    assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # Ticket default
+
+
+def test_new_allocation_request_rerun_returns_the_existing_incident(pi, use_client):
+    allocation, _ = make_storage_allocation(pi)
+    snow = use_client(FakeServiceNow())
+
+    first = tasks.create_allocation_ticket(allocation.pk)
+    assert tasks.create_allocation_ticket(allocation.pk) == first
+    assert len(snow.incidents) == 1
+
+
+def test_request_then_activation_resolves_the_same_incident(pi, requestor, use_client):
+    allocation, _ = make_storage_allocation(pi)
+    snow = use_client(FakeServiceNow())
+
+    opened = tasks.create_allocation_ticket(allocation.pk, requestor_pk=requestor.pk)
+    resolved = tasks.resolve_allocation_ticket(allocation.pk)
+    tasks.resolve_allocation_ticket(allocation.pk)  # re-run: already resolved
+
+    assert resolved == opened
+    [(incident, fields)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert fields["close_code"] == "Solved Remotely (Permanently)"
+    assert fields["close_notes"] == "Allocation activated."
+    comments = fields["comments"]
+    assert f"Your new allocation on Research Storage for project {allocation.project.title} is now active." in comments
+    assert "Quota: 10 TB" in comments and "Path:  /cluster/tufts/lab" in comments
+    assert fields["caller_id"] == "jdoe01"  # the request's people fields are kept
+
+
+def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
+    allocation, _ = make_storage_allocation(pi, path=None)
+    snow = use_client(FakeServiceNow())
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    [(incident, ticket)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert ticket["short_description"] == "Research Storage: New Allocation | 10 TB | " + allocation.project.title
+    assert ticket["caller_id"] == "asmith02"  # no requestor: the PI
+    assert ticket["u_action"] == "Activate/Setup/Install"
+    assert "Path:" not in ticket["comments"]
+
+
+def test_activation_of_an_unsupported_allocation_leaves_its_incident_open(pi, use_client):
+    allocation = make_cluster_allocation(pi)
+    snow = use_client(FakeServiceNow())
+
+    tasks.create_allocation_ticket(allocation.pk)
+    assert tasks.resolve_allocation_ticket(allocation.pk) is None
+
+    [(incident, fields)] = snow.incidents.values()
+    assert incident.state == "2"
+    assert "comments" not in fields or fields["comments"] is None
