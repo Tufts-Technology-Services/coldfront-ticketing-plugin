@@ -1,0 +1,24 @@
+{% autoescape off %}Hello,
+
+Your new research storage has been created. Below are the details.
+
+Tier 1 HPC STORAGE INFORMATION
+=============================================
+Folder Path: {{ path }}
+Quota: {{ quota }}
+
+TIPS & RESOURCES
+
+To avoid running out of storage, please remind members of your team to check the quota by going to ondemand.pax.tufts.edu/pun/sys/shell/ssh/login.pax.tufts.edu and running the command 'df -H {{ path }}' before submitting jobs.
+
+Working outside Tufts network? If yes, you will need to be on Tufts VPN before accessing and utilizing resources on the Tufts HPC Cluster. To download the Tufts VPN software, go to https://access.tufts.edu/vpn.
+
+Please use the following host for DATA TRANSFER (xfer.cluster.tufts.edu) and for LOGIN (login.cluster.tufts.edu). If you are new to the cluster or a self-paced learner, please take a look at the documents in this link: https://tufts.box.com/v/HPC-New-User
+
+Please email tts-research@tufts.edu with any Tufts HPC Cluster related support request. You may also visit https://it.tufts.edu/high-performance-computing for more information on HPC tutorials, workshops or consultations. 
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

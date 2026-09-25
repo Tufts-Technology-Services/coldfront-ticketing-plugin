@@ -1,0 +1,4 @@
+{% autoescape off %}IMPORTANT REMINDER
+Please be advised that the New Tiered Research Storage Environment and Researcher Charge-Back Model will take effect on July 1, 2026. We encourage you to review the changes and plan accordingly. Please visit the following link for full details:
+
+https://it.tufts.edu/research-data-storage#changes{% endautoescape %}

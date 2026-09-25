@@ -1,0 +1,7 @@
+{% autoescape off %}Hello,
+
+{% include "ticketing/partials/hpc_welcome.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

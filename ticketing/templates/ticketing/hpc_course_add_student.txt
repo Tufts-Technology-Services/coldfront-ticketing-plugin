@@ -1,0 +1,13 @@
+{% autoescape off %}Hello,
+
+Your Tufts HPC Cluster account has been created and set up for course {{ course_name }}.
+
+As a student, you now have access to the class folder ({{ course_dir }}) along with a private subfolder ({{ course_dir }}/{{ student_username }}).
+
+Please review Tufts HPC Cluster New User Guide at https://go.tufts.edu/cluster for information regarding HPC Cluster Connection, Login, File Transfer, and Usage.
+
+If you have additional class related questions, please contact your instructor.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

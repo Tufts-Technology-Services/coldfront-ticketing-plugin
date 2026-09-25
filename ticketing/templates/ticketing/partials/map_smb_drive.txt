@@ -1,0 +1,36 @@
+{% autoescape off %}Below are self-service instructions on how to map the drive(s). If assistance is needed, please call the TTS Service Desk at (617) 627-3376 and reference the drive path(s) listed below for your operating system.
+
+SELF-SERVICE DRIVE MAPPING INSTRUCTIONS
+Note: Tufts VPN is required when mapping drive from outside the Tufts network: https://access.tufts.edu/vpn
+
+==================================================
+*** MAC COMPUTERS ***
+==================================================
+Mac Drive Path(s): 
+smb://rstore.it.tufts.edu/{{ share_name }}
+
+To map the drive(s) on a Mac:
+1. Click on Finder then press Command+K
+2. Enter the path to the network drive you want to map
+3. Click Connect
+
+==================================================
+*** WINDOWS COMPUTERS ***
+==================================================
+Windows Drive Path(s): 
+\\rstore.it.tufts.edu\{{ share_name }}
+
+To map the drive(s) on a Windows computer:
+
+1. Open File Explorer and right-click on This PC.
+2. Select "Map network drive" from the menu.
+3. In the Drive dropdown, select a drive letter (R, S, etc.)
+4. In the Folder textbox, type the path of the drive listed above.
+5. If this is a personal computer or otherwise not owned by Tufts, see note below; otherwise click Finish.
+
+For personal computers, check the box for "Connect using different credentials."
+Enter your Tufts username and password at the prompt, adding "TUFTS\" to the username:
+    Username: TUFTS\Tufts_Username
+    Password: Tufts_Password
+Below the password text box it should say "Domain: TUFTS."
+Click OK to submit.{% endautoescape %}

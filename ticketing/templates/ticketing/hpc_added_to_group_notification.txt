@@ -1,0 +1,17 @@
+{% autoescape off %}Hello,
+
+This request has been fulfilled.
+ 
+You now have access to group directory {{ path }}
+A subdirectory folder has also been created for you(i.e., {{ user_path }}).
+
+To check storage quota and user access, do the following:
+1. Go to: https://ondemand.pax.tufts.edu/pun/sys/shell/ssh/login.pax.tufts.edu
+2. Input: df -H {{ path }}
+3. Input: getent group {{ group }}
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

@@ -1,0 +1,10 @@
+{% autoescape off %}Hello,
+
+The requested quota change from {{ old_quota }} to {{ new_quota }} has been applied to the Tier 1 RStore storage.
+{{ share_name }}
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

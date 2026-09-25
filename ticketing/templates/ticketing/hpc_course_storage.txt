@@ -1,0 +1,24 @@
+{% autoescape off %}Hello,
+
+The Tier 1 HPC storage creation for your class is completed. Below are the details on the class storage.
+
+TIER 1 HPC CLASS STORAGE INFORMATION
+==============================================
+Folder Path: {{ course_dir }} 
+Quota: {{ quota }}         
+
+The permission setting for class folders is unique. There are two groups created for the class, admin group ({{ admin_group }}) which only consists instructors and TAs, and general class group ({{ course_group }}) which includes everyone in the class.
+
+This setup will control folder access as follows:
+- Students won't be able to read into each others' folders
+- Students have access to their own folder and {{ course_dir }}/shared
+- Please store the files (instructions, demo files, sample scripts, reference data, etc. ) you need to share with all students in {{ course_dir }}/shared
+- Instructors and TAs have access to all folders (their own folders, students' folders, as well as shared folder)
+
+You and your TA can now start working in the class folder in preparation for the new semester.
+
+Please let us know if you have any questions.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

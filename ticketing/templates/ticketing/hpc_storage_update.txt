@@ -1,0 +1,14 @@
+{% autoescape off %}Hello,
+
+The requested quota change has been applied to Tier 1 HPC storage {{ path }}. 
+
+To verify the quota changes, please do the following:
+NOTE: If you are outside the Tufts network, you need to connect to Tufts VPN first.
+1. Go to ondemand.pax.tufts.edu/pun/sys/shell/ssh/login.pax.tufts.edu
+2. Run: date && df -H {{ path }}
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

@@ -1,0 +1,22 @@
+{% autoescape off %}Closing - Storage created
+
+RSTORE VAST DRIVE INFORMATION
+====================================
+Name: {{ share_name }}
+AD Group: {{ group }}
+Quota: {{ quota }}
+Owner: {{ owner }}
+Approvers: {{ approvers }}
+
+==
+Hello,
+
+Your new RStore Drive has been created. 
+
+{% include "ticketing/partials/map_smb_drive.txt" %}
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}
