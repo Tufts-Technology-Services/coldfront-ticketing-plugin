@@ -25,7 +25,7 @@ dependencies = [
     "coldfront",
     "coldfront_utils@git+https://github.com/Tufts-Technology-Services/coldfront-utils.git",
 ]
-# No pydantic: the vendored Ticket is a stdlib dataclass. See CLAUDE.md, "Ticket format".
+# No pydantic: the vendored Ticket is a stdlib dataclass. See docs/plan.md, change 4.
 
 [project.urls]
 "Source Code" = "https://github.com/Tufts-Technology-Services/coldfront-ticketing"

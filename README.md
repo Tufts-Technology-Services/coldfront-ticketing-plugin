@@ -12,7 +12,7 @@ carrying a `PARSE_START` / `PARSE_END` field block that the ticket system parses
 covered by tests. The signal receivers (`signals.py`) and tasks (`tasks.py`) are still stubs that
 document what belongs in them.
 
-See `docs/plan.md` for the full design and `CLAUDE.md` for project orientation.
+See `docs/plan.md` for the full design.
 
 `tickets.py` has no Django or ColdFront imports, so its tests run standalone:
 
@@ -41,7 +41,7 @@ own settings), then `pytest`.
 Two of those signals (`allocation_renewed`, `user_upgrade_requested`), the `requestor_pk` kwarg on
 the allocation signals, and the `EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED` gate that suppresses
 ColdFront's own ticket emails are all added by a companion PR to the ColdFront fork. This plugin
-cannot function until that lands. See "Core-side dependency" in `CLAUDE.md`.
+cannot function until that lands. See "Part A" in `docs/plan.md`.
 
 ## Install
 

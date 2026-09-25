@@ -1,6 +1,6 @@
 """Ticket model and PARSE_START/PARSE_END header builder.
 
-Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and CLAUDE.md explains
+Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and docs/plan.md explains
 what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
 """
 
