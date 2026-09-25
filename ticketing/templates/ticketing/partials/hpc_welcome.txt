@@ -17,14 +17,4 @@ If assistance is needed with Tufts VPN, please contact TTS Service Desk at 617-6
 New User Guides
 New users of the Tufts HPC cluster should utilize the support documents within the links below.
 The contents are comprised of the following information: login, file transfer, job submission, using applications/software, updated workshop information, etc.
-HPC User Guide (https://go.tufts.edu/cluster)
-
- 
-ADDITIONAL REQUEST AFTER CLUSTER ACCOUNT CREATION:
-If this section was filled out on the Cluster account request, then a child ticket is now in TTS Research Technology Team's queue.
-They will follow-up with you on the additional request very soon.
- 
-Sincerely,
- 
-{{ rt_user }}
-TTS Research Technology{% endautoescape %}
+HPC User Guide (https://go.tufts.edu/cluster){% endautoescape %}
