@@ -1,4 +1,4 @@
-"""Ticket model and PARSE_START/PARSE_END header builder.
+"""Ticket dataclass and its conversion to a ServiceNow incident payload.
 
 Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and docs/plan.md explains
 what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
@@ -7,27 +7,61 @@ what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is te
 import re
 from dataclasses import asdict, dataclass
 
+# Column limits on the Tufts instance (/api/now/ui/meta/incident).
 SHORT_DESCRIPTION_MAX_LENGTH = 160
-LIST_DELIMITER = ","
+LONG_TEXT_MAX_LENGTH = 4000
+# Multi-line text columns that share the 4000-char limit.
+LONG_TEXT_FIELDS = ("description", "close_notes", "comments", "work_notes")
+TRUNCATION_MARKER = "\n[truncated]"
 
 _WHITESPACE = re.compile(r"\s+")
+
+# Reference fields, and the (table, column) that identifies the record each one points at. A Ticket
+# holds these in ColdFront's terms -- UTLNs, group names, incident numbers -- but the Table API
+# wants sys_ids, so to_payload() resolves them. UTLN == sys_user.user_name.
+#
+# Verified against the Tufts dev instance (2026-09-25) by reading existing TTS Research Technology
+# incidents: all of these hold sys_ids, u_contact_person's resolve to sys_user records, and the
+# group and "High Performance Computing (HPC)" sys_ids match what these lookups return.
+REFERENCE_FIELDS = {
+    "u_contact_person": ("sys_user", "user_name"),
+    "caller_id": ("sys_user", "user_name"),
+    "assigned_to": ("sys_user", "user_name"),
+    "watch_list": ("sys_user", "user_name"),
+    "assignment_group": ("sys_user_group", "name"),
+    "u_business_service": ("cmdb_ci_service", "name"),
+    "parent": ("task", "number"),
+}
 
 
 @dataclass(kw_only=True)
 class Ticket:
-    """Fields the ticket system parses out of the header block.
+    """An incident, in ColdFront's terms.
 
-    state/close_code/close_notes are resolution fields: leave them unset to open a ticket, set them
-    to file one that is already resolved.
+    state/close_code/close_notes are resolution fields: leave them unset to open an incident, set
+    them on the update that resolves it. Unset, a new incident comes up Active (2) -- accepted as
+    the opening state for requests. That was observed with assigned_to set; the instance may
+    choose differently without it.
 
-    Declared in the original library's field order, which kw_only makes possible despite the
-    required fields being interleaved with defaulted ones.
+    Choice fields are sent verbatim, so they must be stored values, not UI labels. Verified against
+    the dev instance's field metadata (/api/now/ui/meta/incident): the string defaults below
+    (u_incident_type, category, subcategory, u_action) are valid values identical to their labels;
+    subcategory "Research Systems" is only valid under category "Research". state stores integers
+    (1 New, 2 Active, 8 Pending Request, 6 Resolved, 7 Closed, ...). close_code values differ from
+    their labels -- e.g. "Solved Remotely (Permanently)" is labelled "Solved Remotely" -- and the
+    vendored "Resolved Remotely" is NOT a valid value.
+
+    Declared in the original library's field order, with API-only fields after it; kw_only makes
+    that possible despite required fields being interleaved with defaulted ones.
     """
 
     u_incident_type: str = "Request"
     u_contact_person: str
     caller_id: str
-    source: str = "Email"
+    # "Source" in the UI. The email intake took this as `source`, which is not an incident column
+    # (confirmed on the dev instance) -- the Table API would silently drop it. Unset lets ServiceNow apply
+    # its default; emailed tickets carry "email".
+    contact_type: str | None = None
     category: str = "Research"
     subcategory: str = "Research Systems"
     u_business_service: str = "High Performance Computing (HPC)"
@@ -41,37 +75,59 @@ class Ticket:
     close_code: str | None = None
     close_notes: str | None = None
 
+    description: str | None = None
+    # Deterministic per ColdFront object, so a retried task can find the incident it already made.
+    correlation_id: str | None = None
+    comments: str | None = None  # customer-visible journal entry
+    work_notes: str | None = None  # internal journal entry
 
-def _clean(value) -> str:
-    """Collapse all whitespace to single spaces.
 
-    Header lines are `key:value` joined by newlines, so a value containing a newline would split
-    into a bogus line -- or inject a field outright (`\\nstate:Resolved`). Values reaching here
-    include user-supplied text such as project titles and justifications. Colons are left alone:
-    the parser splits on the first one, and existing ticket titles legitimately contain them.
+def clean_short_description(value: str) -> str:
+    """Collapse whitespace and truncate: short_description is a single-line, length-capped column.
+
+    Values here include user-supplied text such as project titles.
     """
-    return _WHITESPACE.sub(" ", str(value)).strip()
+    return _WHITESPACE.sub(" ", value).strip()[:SHORT_DESCRIPTION_MAX_LENGTH]
 
 
-def create_parse_header(ticket: Ticket) -> str:
-    """Render the ticket as a PARSE_START/PARSE_END block to prepend to an email body."""
-    lines = []
+def clean_long_text(value: str) -> str:
+    """Fit multi-line text into its column, marking the cut so readers know text is missing.
+
+    Line breaks are kept. Rendered allocation detail can run long, and ServiceNow would otherwise
+    truncate silently.
+    """
+    if len(value) <= LONG_TEXT_MAX_LENGTH:
+        return value
+    return value[: LONG_TEXT_MAX_LENGTH - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
+
+
+def fit_update(fields: dict) -> dict:
+    """Apply the long-text limit to a partial-update dict, e.g. the fields that resolve an incident."""
+    return {key: clean_long_text(value) if key in LONG_TEXT_FIELDS else value for key, value in fields.items()}
+
+
+def to_payload(ticket: Ticket, resolve) -> dict:
+    """Build the JSON body that creates an incident.
+
+    `resolve(table, column, value)` returns the sys_id of the record where `column == value`; it is
+    called once per reference value (see REFERENCE_FIELDS). Unset fields and empty lists are
+    omitted rather than sent as null, which ServiceNow would store as a blank.
+
+    Updates (e.g. resolving) carry only a few fields, so they take a plain dict rather than a Ticket.
+    """
+    payload = {}
     for key, value in asdict(ticket).items():
-        if value is None:
+        if value is None or value == []:
             continue
-        if isinstance(value, (list, tuple)):
-            value = LIST_DELIMITER.join(_clean(item) for item in value if _clean(item))
-            if not value:
-                continue
-        else:
-            value = _clean(value)
-        if key == "short_description":
-            value = value[:SHORT_DESCRIPTION_MAX_LENGTH]
-        lines.append(f"{key}:{value}")
-
-    return """
-PARSE_START
-{0}
-PARSE_END
-
-""".format("\n".join(lines))
+        if key in REFERENCE_FIELDS:
+            table, column = REFERENCE_FIELDS[key]
+            if isinstance(value, list):
+                value = ",".join(resolve(table, column, item) for item in value)
+            else:
+                value = resolve(table, column, value)
+        elif key == "short_description":
+            value = clean_short_description(value)
+        elif key in LONG_TEXT_FIELDS:
+            value = clean_long_text(value)
+        payload[key] = value
+    return payload
