@@ -1,18 +1,20 @@
 # coldfront-ticketing
 
-A ColdFront plugin that files tickets into Tufts' ticketing system when allocation and account
-events happen in ColdFront.
+A ColdFront plugin that opens and resolves ServiceNow incidents for allocation requests and
+allocation change requests.
 
-It listens for Django signals, re-queries the affected models, and emails the ticket queue a message
-carrying a `PARSE_START` / `PARSE_END` field block that the ticket system parses into a ticket.
+It listens for Django signals, re-queries the affected models, and calls the ServiceNow Table API:
+an incident is created when a request is submitted and resolved when the request is approved.
 
 ## Status
 
-**Early.** `ticketing/tickets.py` — the `Ticket` model and parse-header builder — is implemented and
-covered by tests. The signal receivers (`signals.py`) and tasks (`tasks.py`) are still stubs that
-document what belongs in them.
+**Early.** The design is settled (`docs/plan.md`). The ServiceNow client (`client.py`) and the
+incident payload (`tickets.py`) are written and tested; the mapping model, the signal receivers
+(`signals.py`) and the tasks (`tasks.py`) are not. Several details
+wait on answers from the ServiceNow team — see "Open questions" in `docs/plan.md`.
 
-See `docs/plan.md` for the full design.
+`ticketing/tickets.py` holds the `Ticket` dataclass and `to_payload`, which turns it into the
+Table API body, resolving UTLNs and group names to sys_ids.
 
 `tickets.py` has no Django or ColdFront imports, so its tests run standalone:
 
@@ -24,43 +26,52 @@ print('ok')
 "
 ```
 
-The rest of the suite needs ColdFront installed (`ticketing/tests/settings.py` layers on ColdFront's
-own settings), then `pytest`.
+The full suite runs with `uv run pytest` (`ticketing/tests/settings.py` layers on ColdFront's own
+settings).
 
 ## Events covered
 
-| Event | Signal | Sender |
-|---|---|---|
-| New allocation request | `allocation_new` | `AllocationCreateView` |
-| Allocation renewed | `allocation_renewed` | `AllocationRenewView` |
-| New allocation change request | `allocation_change_created` | `AllocationChangeView` |
-| Account upgrade request | `user_upgrade_requested` | `UserUpgradeAccount` |
+| Event | Signal | Sender | Action |
+|---|---|---|---|
+| New allocation request | `allocation_new` | `AllocationCreateView` | Create incident |
+| Allocation activated | `allocation_activate` | `AllocationDetailView` | Resolve that incident |
+| New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident |
+| Change request approved | `allocation_change_approved` | `AllocationChangeDetailView` | Resolve that incident |
+
+Denials send no signal; their incidents stay open for admins to handle manually. Allocation renewals
+and account upgrade requests are unused at Tufts and out of scope. See "Out of scope" in
+`docs/plan.md`.
 
 ## Requires a companion ColdFront change
 
-Two of those signals (`allocation_renewed`, `user_upgrade_requested`), the `requestor_pk` kwarg on
-the allocation signals, and the `EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED` gate that suppresses
-ColdFront's own ticket emails are all added by a companion PR to the ColdFront fork. This plugin
-cannot function until that lands. See "Part A" in `docs/plan.md`.
+All four signals already exist in ColdFront. A companion PR to the ColdFront fork adds the
+`requestor_pk` kwarg to the two request signals (without it the submitter can't be recovered) and
+the `EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED` gate that switches off ColdFront's own ticket-queue
+emails. See "Part A" in `docs/plan.md`.
 
 ## Install
 
 Add the package to the deployment's dependencies, then in ColdFront's `local_settings.py`:
 
 ```python
+import os
+
 INSTALLED_APPS += ["ticketing"]
 
 TICKETING_ENABLE_SIGNALS = True
 TICKETING_ASSIGNED_TO = "<service-account-utln>"
 
+# ServiceNow connection. Read credentials from the environment rather than committing them.
+SERVICENOW_URL = os.environ["SERVICENOW_URL"]
+SERVICENOW_USERNAME = os.environ["SERVICENOW_USERNAME"]
+SERVICENOW_PASSWORD = os.environ["SERVICENOW_PASSWORD"]
+
 # Hand ticket creation over to this plugin
 EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED = False
 
-# django-q2: retry must exceed timeout or slow sends get re-run and duplicate tickets
+# django-q2: retry must exceed timeout or slow API calls get re-run while still in flight
 Q_CLUSTER["retry"] = 600
 ```
-
-The ticket queue's intake address is read from ColdFront's existing `EMAIL_TICKET_SYSTEM_ADDRESS`.
 
 ## Layout
 
@@ -68,12 +79,15 @@ The ticket queue's intake address is read from ColdFront's existing `EMAIL_TICKE
 ticketing/
   apps.py       AppConfig; ready() imports signals when TICKETING_ENABLE_SIGNALS
   signals.py    receivers for the four events -> async_task
-  tasks.py      re-query by pk, build ticket, render body, send
-  tickets.py    Ticket model + parse-header builder (adapted from rt-ticket-utils)
-  templates/ticketing/   Django templates for ticket bodies
+  tasks.py      re-query by pk, build the incident payload, create or resolve via the API
+  client.py     ServiceNow Table API client (requests)
+  tickets.py    Ticket dataclass + incident payload builder (adapted from rt-ticket-utils)
+  templates/ticketing/   Django templates for incident description and resolution text
   tests/        settings.py layers on coldfront's real settings; conftest.py fixtures
 docs/
-  plan.md           full design and rationale
+  plan.md           full design, rationale, and open questions
   email_usage.md    inventory of ColdFront's existing email behavior
   reference/        verbatim rt-ticket-utils source the vendored code derives from
 ```
+
+Planned addition: `models.py` (allocation / change request → incident mapping).
