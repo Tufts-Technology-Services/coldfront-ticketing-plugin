@@ -37,6 +37,10 @@ dev = [
     "ruff>=0.11.4",
 ]
 
+[tool.hatch.metadata]
+# coldfront_utils is only published as a git URL.
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["ticketing"]
 
