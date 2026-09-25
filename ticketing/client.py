@@ -4,7 +4,7 @@ No Django imports at module level, so it is testable standalone; client_from_set
 Django settings when a task needs a configured client.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -25,6 +25,8 @@ class ServiceNowError(Exception):
 class Incident:
     sys_id: str
     number: str
+    # Only filled in by find_incident. Left out of equality: an Incident is identified by sys_id.
+    state: str | None = field(default=None, compare=False)
 
 
 class ServiceNowClient:
@@ -94,8 +96,13 @@ class ServiceNowClient:
         return Incident(sys_id=result["sys_id"], number=result["number"])
 
     def find_incident(self, correlation_id) -> Incident | None:
-        matches = self.find(INCIDENT_TABLE, "correlation_id", correlation_id, return_fields=("sys_id", "number"))
-        return Incident(sys_id=matches[0]["sys_id"], number=matches[0]["number"]) if matches else None
+        matches = self.find(
+            INCIDENT_TABLE, "correlation_id", correlation_id, return_fields=("sys_id", "number", "state")
+        )
+        if not matches:
+            return None
+        match = matches[0]
+        return Incident(sys_id=match["sys_id"], number=match["number"], state=match.get("state"))
 
     def update_incident(self, sys_id, fields: dict) -> None:
         """Apply a partial update. Leave keys out rather than passing None; long text is truncated."""

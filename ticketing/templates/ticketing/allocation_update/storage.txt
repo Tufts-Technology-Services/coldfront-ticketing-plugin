@@ -1,0 +1,9 @@
+{% autoescape off %}Hello,
+
+The requested quota change{% if old_quota %} from {{ old_quota }}{% endif %} to {{ new_quota }} has been applied to {{ resource.name }}{% if path %} ({{ path }}){% endif %}.
+
+{% include "ticketing/partials/notifications.txt" %}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}
