@@ -71,14 +71,42 @@ EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED = False
 
 # django-q2: retry must exceed timeout or slow API calls get re-run while still in flight
 Q_CLUSTER["retry"] = 600
+
+# The admin ticketing switch in the menu bar
+TEMPLATES[0]["OPTIONS"]["context_processors"].append("ticketing.context_processors.ticketing_toggle")
 ```
+
+and in `local_urls.py`:
+
+```python
+from django.urls import include, path
+from coldfront.config.urls import urlpatterns
+
+urlpatterns.append(path("ticketing/", include("ticketing.urls")))
+```
+
+### Admin ticketing switch
+
+Superusers get a "Tickets on / Tickets off" control in the menu bar. With it off, nothing they do
+files or resolves a ticket, until they switch it back on or their session ends. The site's navbar
+template must include it, guarded so the template still renders where the plugin isn't installed:
+
+```django
+{% if ticketing_toggle %}{% include 'ticketing/navbar_toggle.html' %}{% endif %}
+```
+
+The switch relies on simple-history's `HistoryRequestMiddleware`, which is in ColdFront's default
+`MIDDLEWARE`. If it's missing, the control shows "Ticket switch unavailable" and refuses to switch.
 
 ## Layout
 
 ```
 ticketing/
   apps.py       AppConfig; ready() imports signals when TICKETING_ENABLE_SIGNALS
-  signals.py    receivers for the four events -> async_task
+  signals.py    receivers for the four events -> enqueue_ticket
+  dispatch.py   enqueue_ticket: the one way tasks get queued; honours the admin switch
+  toggle.py     the admin switch, kept in the session
+  views.py, urls.py, context_processors.py   the menu-bar control (htmx)
   tasks.py      re-query by pk, build the incident payload, create or resolve via the API
   client.py     ServiceNow Table API client (requests)
   tickets.py    Ticket dataclass + incident payload builder (adapted from rt-ticket-utils)
