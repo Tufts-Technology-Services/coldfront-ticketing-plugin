@@ -11,6 +11,8 @@ from coldfront.config.settings import *  # noqa: F403
 # The plugin is not in coldfront's own INSTALLED_APPS; a real deployment adds it
 # the way README.md describes.
 INSTALLED_APPS = [*INSTALLED_APPS, "ticketing"]  # noqa: F405
+ROOT_URLCONF = "ticketing.tests.urls"
+TEMPLATES[0]["OPTIONS"]["context_processors"].append("ticketing.context_processors.ticketing_toggle")  # noqa: F405
 
 DATABASES = {
     "default": {

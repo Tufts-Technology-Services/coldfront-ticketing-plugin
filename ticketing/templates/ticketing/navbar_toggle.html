@@ -1,0 +1,29 @@
+{% comment %}
+Menu-bar control for a superuser's ticketing switch. Include it guarded on the context processor's
+variable, so it renders only for superusers on sites with this plugin:
+  {% if ticketing_toggle %}{% include 'ticketing/navbar_toggle.html' %}{% endif %}
+{% endcomment %}
+<li id="navbar-ticketing" class="nav-item">
+  {% if not ticketing_toggle.available %}
+    <span class="nav-link text-warning" title="simple_history's HistoryRequestMiddleware is not active, so the ticketing switch can't take effect">
+      <i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Ticket switch unavailable
+    </span>
+  {% else %}
+    <form method="post" action="{% url 'ticketing-toggle' %}" class="d-inline">
+      {% csrf_token %}
+      {% if ticketing_toggle.off %}
+        <button type="submit" class="btn btn-sm btn-warning mt-1"
+                hx-post="{% url 'ticketing-toggle' %}" hx-target="#navbar-ticketing" hx-swap="outerHTML"
+                title="Your actions are not filing ServiceNow tickets. Click to turn ticketing back on.">
+          <i class="fas fa-ticket-alt" aria-hidden="true"></i> Tickets off
+        </button>
+      {% else %}
+        <button type="submit" class="btn btn-sm btn-outline-light mt-1"
+                hx-post="{% url 'ticketing-toggle' %}" hx-target="#navbar-ticketing" hx-swap="outerHTML"
+                title="Your actions file ServiceNow tickets. Click to stop filing them for the rest of this session.">
+          <i class="fas fa-ticket-alt" aria-hidden="true"></i> Tickets on
+        </button>
+      {% endif %}
+    </form>
+  {% endif %}
+</li>

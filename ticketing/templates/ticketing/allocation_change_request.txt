@@ -11,7 +11,7 @@ Requested changes:
 {% endfor %}{% if change.end_date_extension %}- End date extension: {{ change.end_date_extension }} days
 {% endif %}{% if not attribute_changes and not change.end_date_extension %}- (none listed)
 {% endif %}
-Justification:
+Reason for change:
 {{ change.justification }}
 
 Review in ColdFront: {{ url }}{% endautoescape %}

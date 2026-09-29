@@ -24,11 +24,8 @@ Denials, allocation renewal and account upgrade requests are out of scope (see d
 Follow the in-tree pattern in coldfront/plugins/freeipa/signals.py: a thin @receiver that does
 nothing but hand off to a task. Each receiver must:
 
-1. Wrap the handoff in transaction.on_commit(). No ColdFront view involved is inside an atomic block
-   today and ATOMIC_REQUESTS is unset, so this is currently a no-op -- but it costs nothing and
-   prevents a stale-read if anyone later wraps those views.
-2. Wrap async_task in try/except Exception and log. django-q2 is configured against Redis with no
-   orm/sync fallback, so an unguarded async_task raises inside the user's POST and 500s allocation
-   submission when Redis is down.
-3. Pass only pks. The task re-queries, so it sees committed state rather than whatever the view held.
+1. Hand off with ticketing.dispatch.enqueue_ticket, never async_task directly. It skips the task
+   when the acting admin has switched ticketing off, waits for transaction.on_commit(), and logs
+   rather than raising if Redis is down (an unguarded async_task would 500 the user's POST).
+2. Pass only pks. The task re-queries, so it sees committed state rather than whatever the view held.
 """

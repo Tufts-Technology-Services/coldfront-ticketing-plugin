@@ -9,7 +9,7 @@ Quantity:     {{ allocation.quantity }}
 Attributes:
 {% for a in attributes %}- {{ a.name }}: {{ a.value }}
 {% endfor %}{% endif %}
-Justification:
+Reason for request:
 {{ allocation.justification }}
 
 Review in ColdFront: {{ url }}{% endautoescape %}

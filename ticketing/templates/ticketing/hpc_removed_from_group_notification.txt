@@ -1,0 +1,11 @@
+{% autoescape off %}Hello,
+
+This request has been fulfilled.
+
+You have been removed from group {{ group }} and no longer have access to group directory {{ path }}
+
+If you believe this was done in error, please contact the project's PI or reply to this ticket.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

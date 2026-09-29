@@ -2,6 +2,8 @@
 
     task                              for (once triggered)         correlation_id
     create_hpc_account_ticket         an HPC account is ready      coldfront:hpc-account:<utln>
+    create_group_membership_ticket    a user is added to a group   coldfront:group-add:<group>:<utln>:<date>
+    create_group_removal_ticket       a user leaves a group        coldfront:group-remove:<group>:<utln>:<date>
     create_allocation_ticket          allocation_new               coldfront:allocation:<pk>
     resolve_allocation_ticket         allocation_activate          coldfront:allocation:<pk>
     create_allocation_change_ticket   allocation_change_created    coldfront:allocation-change:<pk>
@@ -25,6 +27,7 @@ from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
 from coldfront.core.utils.common import import_from_settings
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
+from django.utils import timezone
 
 from ticketing.allocation_updates import (
     UnsupportedUpdate,
@@ -84,6 +87,102 @@ def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
     )
     incident = client.create_incident(ticket)
     logger.info("Filed %s for HPC account %s", incident.number, user.username)
+    return incident
+
+
+def create_group_membership_ticket(
+    username: str, group: str, path: str, user_path: str, requestor_username: str | None = None
+) -> Incident | None:
+    """File an already-resolved incident telling a user they've been added to a project group.
+
+    Mirrors rt-ticket-utils' hpc_added_to_group_ticket_text: the notification covers the group
+    directory, the user's own subdirectory and how to check access. See _group_ticket for who's
+    who, superusers and re-runs.
+    """
+    return _group_ticket(
+        change="add",
+        username=username,
+        group=group,
+        requestor_username=requestor_username,
+        short_description=f"Tier 1 HPC Storage: Grant Access to {user_path}",
+        template="ticketing/hpc_added_to_group_notification.txt",
+        context={"path": path, "user_path": user_path, "group": group},
+        close_notes="Added user to group!",
+    )
+
+
+def create_group_removal_ticket(
+    username: str, group: str, path: str, requestor_username: str | None = None
+) -> Incident | None:
+    """File an already-resolved incident telling a user they've been removed from a project group.
+
+    No rt-ticket-utils counterpart; the notification says which group and directory they've lost
+    access to. See _group_ticket for who's who, superusers and re-runs.
+    """
+    return _group_ticket(
+        change="remove",
+        username=username,
+        group=group,
+        requestor_username=requestor_username,
+        short_description=f"Tier 1 HPC Storage: Remove Access to {path}",
+        template="ticketing/hpc_removed_from_group_notification.txt",
+        context={"path": path, "group": group},
+        close_notes="Removed user from group!",
+    )
+
+
+def _group_ticket(
+    *, change, username, group, requestor_username, short_description, template, context, close_notes
+) -> Incident | None:
+    """File an already-resolved incident about `username` joining or leaving `group`.
+
+    Superusers get no ticket (returns None): they're staff, not customers of the group.
+
+    The notification goes in the customer-visible `comments`, so ServiceNow emails the user, who is
+    the caller. `requestor_username` is whoever asked for the change -- typically the PI or a
+    manager; they become the contact person and are watch-listed. Without it the user stands in. A
+    superuser requestor is taken to be an administrator acting on someone's behalf (contact_type
+    email).
+
+    Group and paths are passed in by whatever made the change, so this plugin needn't know the
+    cluster layout. Safe to re-run the same day: an incident already filed today for this change,
+    user and group (found by correlation_id "coldfront:group-<change>:<group>:<utln>:<YYYY-MM-DD>",
+    in TIME_ZONE) is returned instead of filing another. On a later day -- say the user is re-added
+    after being removed -- a new one is filed.
+    """
+    User = get_user_model()
+    user = User.objects.get(username=username)
+    what = f"group {change} of {user.username} in {group}"
+    if user.is_superuser:
+        logger.info("No incident for %s: superuser", what)
+        return None
+    requestor = User.objects.get(username=requestor_username) if requestor_username else user
+    correlation_id = f"coldfront:group-{change}:{group}:{user.username}:{timezone.localdate().isoformat()}"
+    client = client_from_settings()
+
+    existing = client.find_incident(correlation_id)
+    if existing:
+        logger.info("Incident for %s already filed as %s", what, existing.number)
+        return existing
+
+    on_behalf = requestor.pk != user.pk and requestor.is_superuser
+    ticket = Ticket(
+        u_contact_person=requestor.username,
+        caller_id=user.username,
+        watch_list=[requestor.username] if requestor.pk != user.pk else None,
+        contact_type=CONTACT_TYPE_EMAIL if on_behalf else CONTACT_TYPE_SELF_SERVICE,
+        short_description=short_description,
+        u_business_service="Research Data Storage",
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
+        comments=render_to_string(template, context),
+        correlation_id=correlation_id,
+        state=STATE_RESOLVED,
+        close_code=CLOSE_CODE_SOLVED_REMOTELY,
+        close_notes=close_notes,
+    )
+    incident = client.create_incident(ticket)
+    logger.info("Filed %s for %s", incident.number, what)
     return incident
 
 
