@@ -8,10 +8,11 @@ an incident is created when a request is submitted and resolved when the request
 
 ## Status
 
-**Early.** The design is settled (`docs/plan.md`). The ServiceNow client (`client.py`) and the
-incident payload (`tickets.py`) are written and tested; the mapping model, the signal receivers
-(`signals.py`) and the tasks (`tasks.py`) are not. Several details
-wait on answers from the ServiceNow team — see "Open questions" in `docs/plan.md`.
+**Not yet deployed.** The ServiceNow client (`client.py`), the incident payload (`tickets.py`), the
+tasks (`tasks.py`) and the signal receivers (`signals.py`) are written and tested, and the
+allocation lifecycles have been trial-run on a development instance. Requests open a ticket when
+submitted; the storage plugin's success resolves it. See `docs/plan.md` for the status of each
+piece and what is still open.
 
 `ticketing/tickets.py` holds the `Ticket` dataclass and `to_payload`, which turns it into the
 Table API body, resolving UTLNs and group names to sys_ids.
@@ -59,7 +60,11 @@ import os
 INSTALLED_APPS += ["ticketing"]
 
 TICKETING_ENABLE_SIGNALS = True
-TICKETING_ASSIGNED_TO = "<service-account-utln>"
+TICKETING_ASSIGNED_TO = "<service-account-utln>"  # assignee of resolved tickets
+# Only if the storage plugin's SHARE_CREATION_STATE_ATTRIBUTE_NAME / QUOTA_UPDATE_STATE_ATTRIBUTE_NAME
+# are overridden; these must match them.
+# TICKETING_SHARE_STATE_ATTRIBUTE = "share_creation_state"
+# TICKETING_QUOTA_STATE_ATTRIBUTE = "quota_update_state"
 
 # ServiceNow connection. Read credentials from the environment rather than committing them.
 SERVICENOW_URL = os.environ["SERVICENOW_URL"]
@@ -103,7 +108,7 @@ The switch relies on simple-history's `HistoryRequestMiddleware`, which is in Co
 ```
 ticketing/
   apps.py       AppConfig; ready() imports signals when TICKETING_ENABLE_SIGNALS
-  signals.py    receivers for the four events -> enqueue_ticket
+  signals.py    requests and storage success -> enqueue_ticket
   dispatch.py   enqueue_ticket: the one way tasks get queued; honours the admin switch
   toggle.py     the admin switch, kept in the session
   views.py, urls.py, context_processors.py   the menu-bar control (htmx)

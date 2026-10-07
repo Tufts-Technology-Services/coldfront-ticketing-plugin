@@ -325,6 +325,10 @@ def _resolve_or_file(
 # -- New allocations: opened on allocation_new, resolved on allocation_activate ------------------
 
 
+def allocation_correlation_id(allocation_pk) -> str:
+    return f"coldfront:allocation:{allocation_pk}"
+
+
 def _allocation(allocation_pk):
     return Allocation.objects.select_related("project__pi").get(pk=allocation_pk)
 
@@ -342,7 +346,7 @@ def create_allocation_ticket(
     """
     allocation = _allocation(allocation_pk)
     return _open_request(
-        correlation_id=f"coldfront:allocation:{allocation.pk}",
+        correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
         project=allocation.project,
         requestor_pk=requestor_pk,
@@ -364,7 +368,7 @@ def resolve_allocation_ticket(
     """
     allocation = _allocation(allocation_pk)
     return _resolve_or_file(
-        correlation_id=f"coldfront:allocation:{allocation.pk}",
+        correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
         project=allocation.project,
         requestor_pk=requestor_pk,
@@ -375,6 +379,10 @@ def resolve_allocation_ticket(
 
 
 # -- Change requests: opened on allocation_change_created, resolved on allocation_change_approved -
+
+
+def change_correlation_id(allocation_change_pk) -> str:
+    return f"coldfront:allocation-change:{allocation_change_pk}"
 
 
 def _change(allocation_change_pk):
@@ -394,7 +402,7 @@ def create_allocation_change_ticket(
     """
     change = _change(allocation_change_pk)
     return _open_request(
-        correlation_id=f"coldfront:allocation-change:{change.pk}",
+        correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
         project=change.allocation.project,
         requestor_pk=requestor_pk,
@@ -416,7 +424,7 @@ def resolve_allocation_change_ticket(
     """
     change = _change(allocation_change_pk)
     return _resolve_or_file(
-        correlation_id=f"coldfront:allocation-change:{change.pk}",
+        correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
         project=change.allocation.project,
         requestor_pk=requestor_pk,
