@@ -4,8 +4,11 @@ Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and do
 what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
 """
 
+import logging
 import re
 from dataclasses import asdict, dataclass
+
+logger = logging.getLogger(__name__)
 
 # Column limits on the Tufts instance (/api/now/ui/meta/incident).
 SHORT_DESCRIPTION_MAX_LENGTH = 160
@@ -39,9 +42,9 @@ class Ticket:
     """An incident, in ColdFront's terms.
 
     state/close_code/close_notes are resolution fields: leave them unset to open an incident, set
-    them on the update that resolves it. Unset, a new incident comes up Active (2) -- accepted as
-    the opening state for requests. That was observed with assigned_to set; the instance may
-    choose differently without it.
+    them on the update that resolves it. Unset, the instance picks the opening state: New (1) when
+    assigned_to is unset too, as for requests, and Active (2) when it is set (both seen on the dev
+    instance).
 
     Choice fields are sent verbatim, so they must be stored values, not UI labels. Verified against
     the dev instance's field metadata (/api/now/ui/meta/incident): the string defaults below
@@ -66,7 +69,9 @@ class Ticket:
     subcategory: str = "Research Systems"
     u_business_service: str = "High Performance Computing (HPC)"
     short_description: str
-    assigned_to: str
+    # Unset, the incident waits unassigned in assignment_group's queue. Required on a ticket filed
+    # already resolved (see __post_init__).
+    assigned_to: str | None = None
     assignment_group: str = "TTS Research Technology"
     parent: str | None = None
     watch_list: list[str] | None = None
@@ -80,6 +85,10 @@ class Ticket:
     correlation_id: str | None = None
     comments: str | None = None  # customer-visible journal entry
     work_notes: str | None = None  # internal journal entry
+
+    def __post_init__(self):
+        if self.state is not None and not self.assigned_to:
+            raise ValueError(f"A ticket filed with state {self.state!r} needs assigned_to")
 
 
 def clean_short_description(value: str) -> str:
@@ -106,12 +115,28 @@ def fit_update(fields: dict) -> dict:
     return {key: clean_long_text(value) if key in LONG_TEXT_FIELDS else value for key, value in fields.items()}
 
 
+def to_update(fields: dict, resolve) -> dict:
+    """Build the JSON body for a partial update: references resolved as in to_payload, long text fitted."""
+    body = fit_update(fields)
+    for key, value in body.items():
+        if key in REFERENCE_FIELDS:
+            table, column = REFERENCE_FIELDS[key]
+            if isinstance(value, list):
+                body[key] = ",".join(_resolve_members(key, table, column, value, resolve))
+            else:
+                body[key] = resolve(table, column, value)
+    return body
+
+
 def to_payload(ticket: Ticket, resolve) -> dict:
     """Build the JSON body that creates an incident.
 
     `resolve(table, column, value)` returns the sys_id of the record where `column == value`; it is
     called once per reference value (see REFERENCE_FIELDS). Unset fields and empty lists are
     omitted rather than sent as null, which ServiceNow would store as a blank.
+
+    A list member `resolve` can't find (it raises LookupError) is logged and left off, so one
+    unknown watcher doesn't stop the ticket; any other unknown reference raises.
 
     Updates (e.g. resolving) carry only a few fields, so they take a plain dict rather than a Ticket.
     """
@@ -122,7 +147,9 @@ def to_payload(ticket: Ticket, resolve) -> dict:
         if key in REFERENCE_FIELDS:
             table, column = REFERENCE_FIELDS[key]
             if isinstance(value, list):
-                value = ",".join(resolve(table, column, item) for item in value)
+                value = ",".join(_resolve_members(key, table, column, value, resolve))
+                if not value:
+                    continue
             else:
                 value = resolve(table, column, value)
         elif key == "short_description":
@@ -131,3 +158,14 @@ def to_payload(ticket: Ticket, resolve) -> dict:
             value = clean_long_text(value)
         payload[key] = value
     return payload
+
+
+def _resolve_members(key, table, column, values, resolve):
+    """The sys_ids of the `values` that resolve, skipping (and logging) any that don't."""
+    sys_ids = []
+    for value in values:
+        try:
+            sys_ids.append(resolve(table, column, value))
+        except LookupError as e:
+            logger.warning("Leaving %r off %s: %s", value, key, e)
+    return sys_ids

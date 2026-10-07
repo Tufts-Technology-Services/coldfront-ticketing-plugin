@@ -1,5 +1,6 @@
 import pytest
 from coldfront.core.test_helpers import factories as f
+from django.contrib.auth import get_user_model
 from django.urls import reverse
 
 from ticketing import tasks
@@ -132,8 +133,21 @@ def test_resolves_the_open_incident_for_the_change(pi, use_client):
     assert fields["state"] == "6"
     assert fields["close_code"] == "Solved Remotely (Permanently)"
     assert fields["close_notes"] == "Quota updated."
+    assert fields["assigned_to"] == "svc_test"  # no one had picked it up
     assert "to 20 TB" in fields["comments"]
     assert client.created == []
+
+
+def test_resolving_keeps_the_assignee_an_admin_set(pi, use_client):
+    change = make_storage_change(pi)
+    picked_up = Incident(sys_id="i-0", number="INC0000000", state="2", assigned_to="u-admin")
+    client = use_client(FakeClient(existing=picked_up))
+
+    tasks.resolve_allocation_change_ticket(change.pk)
+
+    [(_, fields)] = client.updated
+    assert "assigned_to" not in fields
+    assert fields["state"] == "6"
 
 
 def test_already_resolved_incident_is_not_commented_on_again(pi, use_client):
@@ -159,6 +173,7 @@ def test_files_a_resolved_incident_when_none_exists(pi, requestor, use_client):
     assert ticket.u_business_service == "Research Data Storage"
     assert ticket.u_action == "Move/Add/Change"
     assert ticket.state == "6" and ticket.close_code == "Solved Remotely (Permanently)"
+    assert ticket.assigned_to == "svc_test"
     assert ticket.correlation_id == f"coldfront:allocation-change:{change.pk}"
 
 
@@ -198,6 +213,109 @@ def test_contact_type_superuser_on_someone_elses_project_is_email(pi, django_use
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
     assert tasks.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
+
+
+# -- project_watchers --------------------------------------------------------------------------
+
+
+def add_member(project, username, role="Manager", status="Active", enable_notifications=True):
+    """Put a user on the project. "Manager" is the role Tufts labels Approver."""
+    user = f.UserFactory(username=username)
+    f.ProjectUserFactory(
+        project=project,
+        user=user,
+        role=f.ProjectUserRoleChoiceFactory(name=role),
+        status=f.ProjectUserStatusChoiceFactory(name=status),
+        enable_notifications=enable_notifications,
+    )
+    return user
+
+
+@pytest.fixture
+def project_with_approvers(pi):
+    """A project whose PI is a Manager on it (as ColdFront makes them), with two Approvers."""
+    project = f.ProjectFactory(pi=pi)
+    f.ProjectUserFactory(project=project, user=pi, role=f.ProjectUserRoleChoiceFactory(name="Manager"))
+    add_member(project, "czhang04")
+    add_member(project, "bjones03")
+    return project
+
+
+def test_pi_request_watches_the_approvers(pi, project_with_approvers):
+    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+
+
+def test_approver_request_watches_the_pi_and_the_other_approvers(project_with_approvers):
+    approver = get_user_model().objects.get(username="bjones03")
+
+    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+
+
+def test_administrator_request_watches_the_pi_and_every_approver(project_with_approvers, django_user_model):
+    admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
+
+    assert tasks.project_watchers(project_with_approvers, admin) == ["asmith02", "bjones03", "czhang04"]
+
+
+def test_only_active_approvers_with_notifications_on_are_watchers(pi, project_with_approvers):
+    add_member(project_with_approvers, "dlee05", role="User")
+    add_member(project_with_approvers, "egarcia06", status="Removed")
+    add_member(project_with_approvers, "fkim07", enable_notifications=False)
+
+    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+
+
+def test_the_pi_is_watched_even_without_notifications(project_with_approvers, pi):
+    project_with_approvers.projectuser_set.filter(user=pi).update(enable_notifications=False)
+    approver = get_user_model().objects.get(username="bjones03")
+
+    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+
+
+def test_approver_request_ticket_watches_the_pi_and_other_approvers(pi, project_with_approvers, use_client):
+    allocation, _ = make_storage_allocation(pi)
+    allocation.project = project_with_approvers
+    allocation.save()
+    approver = get_user_model().objects.get(username="czhang04")
+    snow = use_client(FakeServiceNow())
+
+    tasks.create_allocation_ticket(allocation.pk, requestor_pk=approver.pk)
+
+    _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
+    assert ticket["caller_id"] == "czhang04"
+    assert ticket["watch_list"] == ["asmith02", "bjones03"]
+    assert ticket["contact_type"] == "self-service"
+
+
+def test_affected_client_is_the_caller_and_the_requestor_the_contact(
+    pi, project_with_approvers, django_user_model, use_client
+):
+    allocation, _ = make_storage_allocation(pi)
+    allocation.project = project_with_approvers
+    allocation.save()
+    admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
+    approver = get_user_model().objects.get(username="bjones03")
+    snow = use_client(FakeServiceNow())
+
+    tasks.create_allocation_ticket(allocation.pk, requestor_pk=admin.pk, affected_pk=approver.pk)
+
+    _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
+    assert ticket["u_contact_person"] == "admin01"
+    assert ticket["caller_id"] == "bjones03"
+    assert ticket["watch_list"] == ["asmith02", "czhang04"]  # neither person already on the ticket
+    assert ticket["contact_type"] == "email"  # follows the requestor, an administrator
+
+
+def test_resolve_files_with_the_affected_client_as_caller(pi, requestor, use_client):
+    change = make_storage_change(pi)
+    client = use_client(FakeClient())
+
+    tasks.resolve_allocation_change_ticket(change.pk, requestor_pk=requestor.pk, affected_pk=pi.pk)
+
+    [ticket] = client.created
+    assert ticket.u_contact_person == "jdoe01"
+    assert ticket.caller_id == "asmith02"
+    assert ticket.watch_list is None  # the PI is the caller, and there are no Approvers
 
 
 # -- create_allocation_change_ticket -----------------------------------------------------------
@@ -241,7 +359,8 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
 
     _, ticket = snow.incidents[f"coldfront:allocation-change:{change.pk}"]
     assert incident.number == "INC0000001"
-    assert ticket["state"] is None  # left for the instance to open as Active
+    assert ticket["state"] is None  # left for the instance to choose
+    assert ticket["assigned_to"] is None  # waits in the group queue
     assert ticket["short_description"] == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
     assert ticket["caller_id"] == "jdoe01" and ticket["watch_list"] == ["asmith02"]
     assert ticket["u_business_service"] == "Research Data Storage"
@@ -307,6 +426,7 @@ def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requesto
     _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
     assert incident.number == "INC0000001"
     assert ticket["state"] is None
+    assert ticket["assigned_to"] is None
     assert ticket["short_description"] == (
         f"Research Storage: New Allocation Request | 10 TB | {allocation.project.title}"
     )
