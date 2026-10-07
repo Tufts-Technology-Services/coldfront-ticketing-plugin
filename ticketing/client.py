@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import requests
 
-from ticketing.tickets import Ticket, fit_update, to_payload
+from ticketing.tickets import Ticket, to_payload, to_update
 
 DEFAULT_TIMEOUT = 30
 INCIDENT_TABLE = "incident"
@@ -21,12 +21,17 @@ class ServiceNowError(Exception):
     """The API rejected a request, or a lookup didn't match exactly one record."""
 
 
+class UnknownReference(ServiceNowError, LookupError):
+    """A lookup didn't match exactly one record. to_payload drops these from list fields."""
+
+
 @dataclass(frozen=True)
 class Incident:
     sys_id: str
     number: str
     # Only filled in by find_incident. Left out of equality: an Incident is identified by sys_id.
     state: str | None = field(default=None, compare=False)
+    assigned_to: str | None = field(default=None, compare=False)  # a sys_id; None if unassigned
 
 
 class ServiceNowClient:
@@ -84,7 +89,7 @@ class ServiceNowClient:
             matches = self.find(table, column, value, limit=2)
             if len(matches) != 1:
                 found = "no" if not matches else "more than one"
-                raise ServiceNowError(f"Expected one {table} record with {column}={value!r}, found {found}")
+                raise UnknownReference(f"Expected one {table} record with {column}={value!r}, found {found}")
             self._sys_ids[key] = matches[0]["sys_id"]
         return self._sys_ids[key]
 
@@ -97,16 +102,26 @@ class ServiceNowClient:
 
     def find_incident(self, correlation_id) -> Incident | None:
         matches = self.find(
-            INCIDENT_TABLE, "correlation_id", correlation_id, return_fields=("sys_id", "number", "state")
+            INCIDENT_TABLE,
+            "correlation_id",
+            correlation_id,
+            return_fields=("sys_id", "number", "state", "assigned_to"),
         )
         if not matches:
             return None
         match = matches[0]
-        return Incident(sys_id=match["sys_id"], number=match["number"], state=match.get("state"))
+        return Incident(
+            sys_id=match["sys_id"],
+            number=match["number"],
+            state=match.get("state"),
+            # An empty reference comes back as "".
+            assigned_to=match.get("assigned_to") or None,
+        )
 
     def update_incident(self, sys_id, fields: dict) -> None:
-        """Apply a partial update. Leave keys out rather than passing None; long text is truncated."""
-        self.update(INCIDENT_TABLE, sys_id, fit_update(fields))
+        """Apply a partial update. Leave keys out rather than passing None; long text is truncated,
+        and references (e.g. assigned_to) are given in ColdFront's terms and resolved as on create."""
+        self.update(INCIDENT_TABLE, sys_id, to_update(fields, self.sys_id_for))
 
 
 def client_from_settings() -> ServiceNowClient:

@@ -4,7 +4,7 @@ import pytest
 import responses
 from responses import matchers
 
-from ticketing.client import Incident, ServiceNowClient, ServiceNowError
+from ticketing.client import Incident, ServiceNowClient, ServiceNowError, UnknownReference
 from ticketing.tickets import Ticket
 
 BASE = "https://servicenow.example"
@@ -96,7 +96,8 @@ def test_lookup_with_no_match_raises(client, api):
     # What the Tufts instance actually returns for a query with no matches.
     api.get(f"{TABLE}/sys_user", status=404, json=NO_RECORD)
 
-    with pytest.raises(ServiceNowError, match="found no"):
+    # A LookupError, so to_payload can leave an unknown watcher off instead of failing the ticket.
+    with pytest.raises(UnknownReference, match="found no"):
         client.sys_id_for("sys_user", "user_name", "nobody")
 
 
@@ -116,7 +117,7 @@ def test_404_on_a_write_still_raises(client, api):
 def test_ambiguous_lookup_raises(client, api):
     api.get(f"{TABLE}/sys_user_group", json={"result": [{"sys_id": "a"}, {"sys_id": "b"}]})
 
-    with pytest.raises(ServiceNowError, match="more than one"):
+    with pytest.raises(UnknownReference, match="more than one"):
         client.sys_id_for("sys_user_group", "name", "Research")
 
 
@@ -144,6 +145,17 @@ def test_find_incident_by_correlation_id(client, api):
     assert client.find_incident("coldfront:allocation:7") == Incident(sys_id="i-1", number="INC0000001")
 
 
+@pytest.mark.parametrize(("stored", "expected"), [("u-svc", "u-svc"), ("", None)])
+def test_find_incident_reports_the_assignee(client, api, stored, expected):
+    api.get(
+        f"{TABLE}/incident",
+        match=[matchers.query_param_matcher({"sysparm_fields": "sys_id,number,state,assigned_to"}, strict_match=False)],
+        json={"result": [{"sys_id": "i-1", "number": "INC0000001", "state": "2", "assigned_to": stored}]},
+    )
+
+    assert client.find_incident("coldfront:allocation:7").assigned_to == expected
+
+
 def test_find_incident_returns_none_when_absent(client, api):
     api.get(f"{TABLE}/incident", status=404, json=NO_RECORD)
 
@@ -156,6 +168,15 @@ def test_update_incident_patches_the_record(client, api):
     client.update_incident("i-1", {"state": "6", "close_notes": "Allocation activated"})
 
     assert json.loads(patch.calls[0].request.body) == {"state": "6", "close_notes": "Allocation activated"}
+
+
+def test_update_incident_resolves_the_assignee(client, api):
+    user_lookup(api, "svc_test", "u-svc")
+    patch = api.patch(f"{TABLE}/incident/i-1", json={"result": {"sys_id": "i-1"}})
+
+    client.update_incident("i-1", {"assigned_to": "svc_test", "state": "6"})
+
+    assert json.loads(patch.calls[0].request.body) == {"assigned_to": "u-svc", "state": "6"}
 
 
 def test_update_incident_truncates_long_text(client, api):
