@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 
 from ticketing import tasks
 from ticketing.client import Incident
+from ticketing.tests.test_allocation_updates import FakeServiceNow
 
 
 class FakeClient:
@@ -13,6 +14,7 @@ class FakeClient:
     def __init__(self, existing=None):
         self.existing = existing
         self.created = []
+        self.updated = []
         self.looked_up = []
 
     def find_incident(self, correlation_id):
@@ -23,6 +25,9 @@ class FakeClient:
         self.created.append(ticket)
         return Incident(sys_id="i-1", number="INC0000001")
 
+    def update_incident(self, sys_id, fields):
+        self.updated.append((sys_id, fields))
+
 
 @pytest.fixture
 def fake_client(monkeypatch):
@@ -31,11 +36,63 @@ def fake_client(monkeypatch):
     return client
 
 
+@pytest.fixture
+def use_client(monkeypatch):
+    def install(client):
+        monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+        return client
+
+    return install
+
+
 pytestmark = pytest.mark.django_db
 
 
-def test_files_a_resolved_incident_for_the_new_user(requestor, fake_client):
+# -- HPC accounts --------------------------------------------------------------------------------
+
+
+def test_account_waiting_on_a_uid_opens_an_incident_for_admins(requestor, fake_client):
     incident = tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+
+    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    [ticket] = fake_client.created
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
+    assert ticket.contact_type == "self-service"
+    assert ticket.state is None and ticket.assigned_to is None  # waits New in the group queue
+    assert ticket.short_description == "HPC Account Creation | /cluster/home/jdoe01"
+    assert ticket.correlation_id == "coldfront:hpc-account:jdoe01"
+    assert ticket.comments is None  # nothing customer-facing until the account exists
+    assert "waiting on a UID" in ticket.description
+    assert "jdoe01" in ticket.description and "/cluster/home/jdoe01" in ticket.description
+
+
+def test_account_waiting_on_a_uid_rerun_returns_the_existing_incident(requestor, use_client):
+    existing = Incident(sys_id="i-0", number="INC0000000", state="1")
+    client = use_client(FakeClient(existing=existing))
+
+    assert tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == existing
+    assert client.looked_up == ["coldfront:hpc-account:jdoe01"]
+    assert client.created == []
+
+
+def test_account_created_resolves_the_waiting_incident_with_the_welcome(requestor, use_client):
+    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="1")))
+
+    assert tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == Incident("i-0", "INC0000000")
+
+    assert client.looked_up == ["coldfront:hpc-account:jdoe01"]
+    [(sys_id, fields)] = client.updated
+    assert sys_id == "i-0"
+    assert fields["state"] == "6"
+    assert fields["close_code"] == "Solved Remotely (Permanently)"
+    assert fields["close_notes"] == "Cluster account created!"
+    assert fields["assigned_to"] == "svc_test"  # no one had picked it up
+    assert fields["comments"].startswith("Hello,")
+    assert client.created == []
+
+
+def test_account_created_without_a_waiting_incident_files_a_resolved_one(requestor, fake_client):
+    incident = tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
     assert incident == Incident(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
@@ -43,6 +100,8 @@ def test_files_a_resolved_incident_for_the_new_user(requestor, fake_client):
     assert ticket.assigned_to == "svc_test"  # TICKETING_ASSIGNED_TO in tests/settings.py
     assert ticket.contact_type == "self-service"
     assert ticket.short_description == "HPC Account Creation | /cluster/home/jdoe01"
+    assert ticket.u_business_service == "High Performance Computing (HPC)"
+    assert ticket.u_action == "Activate/Setup/Install"
     assert ticket.state == "6"
     assert ticket.close_code == "Solved Remotely (Permanently)"
     assert ticket.close_notes == "Cluster account created!"
@@ -50,7 +109,7 @@ def test_files_a_resolved_incident_for_the_new_user(requestor, fake_client):
 
 
 def test_welcome_text_goes_in_the_customer_visible_comments(requestor, fake_client):
-    tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+    tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
     comments = fake_client.created[0].comments
     assert comments.startswith("Hello,")
@@ -59,19 +118,33 @@ def test_welcome_text_goes_in_the_customer_visible_comments(requestor, fake_clie
     assert "&amp;" not in comments and "{%" not in comments
 
 
-def test_rerun_returns_the_existing_incident_without_filing_another(requestor, monkeypatch):
-    existing = Incident(sys_id="i-0", number="INC0000000")
-    client = FakeClient(existing=existing)
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+def test_waiting_then_created_resolves_the_same_incident(requestor, use_client):
+    snow = use_client(FakeServiceNow())
 
-    assert tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == existing
-    assert client.looked_up == ["coldfront:hpc-account:jdoe01"]
-    assert client.created == []
+    opened = tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+    resolved = tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+    tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")  # re-run: already resolved
+
+    assert resolved == opened
+    [(incident, fields)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert fields["assigned_to"] == "svc_test"
+    assert fields["comments"].count("Hello,") == 1
+    assert "waiting on a UID" in fields["description"]  # the admin summary is kept
 
 
-def test_unknown_user_raises_before_calling_servicenow(fake_client):
+def test_account_already_resolved_is_left_alone(requestor, use_client):
+    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="6")))
+
+    tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+
+    assert client.updated == [] and client.created == []
+
+
+@pytest.mark.parametrize("task", [tasks.create_hpc_account_ticket, tasks.resolve_hpc_account_ticket])
+def test_unknown_user_raises_before_calling_servicenow(fake_client, task):
     with pytest.raises(get_user_model().DoesNotExist):
-        tasks.create_hpc_account_ticket("nobody", "/cluster/home/nobody")
+        task("nobody", "/cluster/home/nobody")
 
     assert fake_client.looked_up == [] and fake_client.created == []
 

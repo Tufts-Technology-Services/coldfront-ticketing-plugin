@@ -16,6 +16,7 @@ LONG_TEXT_MAX_LENGTH = 4000
 # Multi-line text columns that share the 4000-char limit.
 LONG_TEXT_FIELDS = ("description", "close_notes", "comments", "work_notes")
 TRUNCATION_MARKER = "\n[truncated]"
+DEFAULT_BUSINESS_SERVICE = "High Performance Computing (HPC)"
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -67,7 +68,7 @@ class Ticket:
     contact_type: str | None = None
     category: str = "Research"
     subcategory: str = "Research Systems"
-    u_business_service: str = "High Performance Computing (HPC)"
+    u_business_service: str = DEFAULT_BUSINESS_SERVICE
     short_description: str
     # Unset, the incident waits unassigned in assignment_group's queue. Required on a ticket filed
     # already resolved (see __post_init__).
