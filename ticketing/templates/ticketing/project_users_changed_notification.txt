@@ -1,0 +1,10 @@
+{% autoescape off %}Hello,
+
+The users on your project "{{ project.title }}" in ColdFront have changed. Access to the project's
+resources is being updated to match.
+
+To see who is on the project, visit: {{ url }}
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

@@ -5,6 +5,7 @@
     resolve_hpc_account_ticket        an HPC account is created *          coldfront:hpc-account:<utln>
     create_group_membership_ticket    a user is added to a group *         coldfront:group-add:<group>:<utln>:<date>
     create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
+    create_project_users_ticket       project_(activate|remove)_user       coldfront:project-users:<pk>:<date>
     create_allocation_ticket          allocation_new                       coldfront:allocation:<pk>
     resolve_allocation_ticket         share_creation_state = success       coldfront:allocation:<pk>
     create_allocation_change_ticket   allocation_change_created            coldfront:allocation-change:<pk>
@@ -27,9 +28,12 @@ open for an admin.
 import logging
 
 from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
+from coldfront.core.project.models import Project
 from coldfront.core.utils.common import import_from_settings
+from coldfront.core.utils.mail import build_link
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils import timezone
 
 from ticketing.allocation_updates import (
@@ -42,7 +46,7 @@ from ticketing.allocation_updates import (
     describe_request,
 )
 from ticketing.client import Incident, client_from_settings
-from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, Ticket
+from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, Ticket, clean_short_description
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +214,52 @@ def _group_ticket(
         state=STATE_RESOLVED,
         close_code=CLOSE_CODE_SOLVED_REMOTELY,
         close_notes=close_notes,
+    )
+    incident = client.create_incident(ticket)
+    logger.info("Filed %s for %s", incident.number, what)
+    return incident
+
+
+# -- Project users: one notice per project, per day ---------------------------------------------
+
+
+def project_users_correlation_id(project_pk) -> str:
+    return f"coldfront:project-users:{project_pk}:{timezone.localdate().isoformat()}"
+
+
+def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None) -> Incident:
+    """File one already-resolved notice that a project's users have changed today.
+
+    The message is generic -- it names no users and doesn't say whether they were added or
+    removed -- so one ticket covers every change to the project's users that day: the
+    correlation_id "coldfront:project-users:<project pk>:<YYYY-MM-DD>" (in TIME_ZONE) finds an
+    earlier one, which is returned instead of filing another. People as for allocation requests
+    (_people_fields): whoever made the change is caller and contact, the PI standing in without
+    `requestor_pk`, and the PI and Approvers are watch-listed.
+    """
+    project = Project.objects.select_related("pi").get(pk=project_pk)
+    correlation_id = project_users_correlation_id(project.pk)
+    what = f"user changes on project {project.pk}"
+    client = client_from_settings()
+
+    existing = client.find_incident(correlation_id)
+    if existing:
+        logger.info("Incident for %s today already filed as %s", what, existing.number)
+        return existing
+
+    _, people_fields = _people_fields(project, requestor_pk)
+    url = build_link(reverse("project-detail", kwargs={"pk": project.pk}))
+    ticket = Ticket(
+        **people_fields,
+        short_description=clean_short_description(f"Project Users Changed | {project.title}"),
+        u_business_service="Research Data Storage",
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
+        comments=render_to_string("ticketing/project_users_changed_notification.txt", {"project": project, "url": url}),
+        correlation_id=correlation_id,
+        state=STATE_RESOLVED,
+        close_code=CLOSE_CODE_SOLVED_REMOTELY,
+        close_notes="Project users updated.",
     )
     incident = client.create_incident(ticket)
     logger.info("Filed %s for %s", incident.number, what)

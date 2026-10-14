@@ -1,10 +1,11 @@
 # coldfront-ticketing
 
 A ColdFront plugin that opens and resolves ServiceNow incidents for allocation requests and
-allocation change requests.
+allocation change requests, and files notices when a project's users change.
 
 It listens for Django signals, re-queries the affected models, and calls the ServiceNow Table API:
-an incident is created when a request is submitted and resolved when the request is approved.
+an incident is created when a request is submitted and resolved once the storage plugin reports the
+approved work done.
 
 ## Status
 
@@ -35,9 +36,30 @@ settings).
 | Event | Signal | Sender | Action |
 |---|---|---|---|
 | New allocation request | `allocation_new` | `AllocationCreateView` | Create incident |
-| Allocation activated | `allocation_activate` | `AllocationDetailView` | Resolve that incident |
+| Share created | `post_save`: `share_creation_state` = `success` | `AllocationAttribute` | Resolve the allocation's incident |
 | New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident |
-| Change request approved | `allocation_change_approved` | `AllocationChangeDetailView` | Resolve that incident |
+| Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident |
+| Allocation or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | Nothing, unless the approving admin's switch is off (see below) |
+| Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
+
+**Requests resolve on storage success, not on approval.** The storage plugin creates shares and
+sets quotas in background tasks after approval, and records each outcome in an allocation
+attribute. Resolving on approval could tell the customer "done" before, or despite, a failure. A
+failure leaves the incident open for an admin. The resolve runs in the storage plugin's task, where
+the approving admin's switch isn't visible, so approving with the switch off leaves a private
+`ticketing_suppressed` marker on the allocation and that request's resolve is skipped. See
+"Triggers" in `docs/plan.md`.
+
+**Project user notices are once per calendar day, by design.** The first add or remove on a project
+files a generic, already-resolved notice ("the users on your project have changed"). Every later
+change to that project's users the same day files nothing. That includes a removal after a morning
+add, so the PI and Approvers aren't told about it. The next day's first change files a new notice.
+
+**Adding or removing the PI files nothing.** Tufts' project-create view sends
+`project_activate_user` for the new project's PI, so without this every new project would get a
+notice that its users had changed. A PI isn't otherwise added to or removed from a project.
+Superusers are skipped too: they're staff, not project members to notify. See "Project user
+tickets" in `docs/plan.md`.
 
 Denials send no signal; their incidents stay open for admins to handle manually. Allocation renewals
 and account upgrade requests are unused at Tufts and out of scope. See "Out of scope" in
@@ -45,8 +67,9 @@ and account upgrade requests are unused at Tufts and out of scope. See "Out of s
 
 ## Requires a companion ColdFront change
 
-All four signals already exist in ColdFront. A companion PR to the ColdFront fork adds the
-`requestor_pk` kwarg to the two request signals (without it the submitter can't be recovered) and
+All these signals already exist in ColdFront. A companion PR to the ColdFront fork adds the
+`requestor_pk` kwarg to the two request signals (until then the receivers take the submitter from
+the current request, which works only while the signal is sent from a view) and
 the `EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED` gate that switches off ColdFront's own ticket-queue
 emails. See "Part A" in `docs/plan.md`.
 
@@ -108,7 +131,7 @@ The switch relies on simple-history's `HistoryRequestMiddleware`, which is in Co
 ```
 ticketing/
   apps.py       AppConfig; ready() imports signals when TICKETING_ENABLE_SIGNALS
-  signals.py    requests and storage success -> enqueue_ticket
+  signals.py    requests, storage success, project user changes -> enqueue_ticket
   dispatch.py   enqueue_ticket: the one way tasks get queued; honours the admin switch
   toggle.py     the admin switch, kept in the session
   views.py, urls.py, context_processors.py   the menu-bar control (htmx)
