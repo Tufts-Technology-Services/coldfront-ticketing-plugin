@@ -1,6 +1,7 @@
 import datetime
 
 import pytest
+from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
 
 from ticketing import tasks
@@ -151,7 +152,7 @@ def test_unknown_user_raises_before_calling_servicenow(fake_client, task):
 
 @pytest.fixture(autouse=True)
 def today(monkeypatch):
-    """Pin the date the group tasks put in their correlation_id."""
+    """Pin the date the group and project-users tasks put in their correlation_id."""
     day = {"today": datetime.date(2026, 9, 28)}
     monkeypatch.setattr(tasks.timezone, "localdate", lambda: day["today"])
     return day
@@ -281,3 +282,79 @@ def test_group_membership_on_a_later_day_files_a_new_incident(requestor, today, 
     ]
     [ticket] = client.created
     assert ticket.correlation_id == "coldfront:group-add:lab_smith:jdoe01:2026-10-05"
+
+
+# -- Project users --------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def project(pi):
+    """A project whose PI is a Manager on it, with one more Approver (role Manager)."""
+    project = f.ProjectFactory(pi=pi, title="Genomics Lab")
+    manager = f.ProjectUserRoleChoiceFactory(name="Manager")
+    f.ProjectUserFactory(project=project, user=pi, role=manager)
+    f.ProjectUserFactory(project=project, user=f.UserFactory(username="bjones03"), role=manager)
+    return project
+
+
+def test_files_a_resolved_notice_for_the_project(project, requestor, fake_client):
+    incident = tasks.create_project_users_ticket(project.pk, requestor_pk=requestor.pk)
+
+    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    [ticket] = fake_client.created
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
+    assert ticket.watch_list == ["asmith02", "bjones03"]  # the PI and the Approver
+    assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
+    assert ticket.short_description == "Project Users Changed | Genomics Lab"
+    assert ticket.u_business_service == "Research Data Storage"
+    assert ticket.u_action == "Move/Add/Change"
+    assert ticket.assigned_to == "svc_test"
+    assert ticket.state == "6" and ticket.close_code == "Solved Remotely (Permanently)"
+    assert ticket.close_notes == "Project users updated."
+    assert ticket.correlation_id == f"coldfront:project-users:{project.pk}:2026-09-28"
+
+
+def test_notice_is_generic_and_links_the_project(project, fake_client):
+    tasks.create_project_users_ticket(project.pk)
+
+    comments = fake_client.created[0].comments
+    assert comments.startswith("Hello,")
+    assert 'The users on your project "Genomics Lab" in ColdFront have changed.' in comments
+    assert f"/project/{project.pk}/" in comments
+    assert "Research Technology (RT)" in comments  # footer
+    assert "&amp;" not in comments and "{%" not in comments
+
+
+def test_change_by_the_pi_watches_the_approvers(project, pi, fake_client):
+    tasks.create_project_users_ticket(project.pk, requestor_pk=pi.pk)
+
+    [ticket] = fake_client.created
+    assert ticket.caller_id == "asmith02"
+    assert ticket.watch_list == ["bjones03"]
+    assert ticket.contact_type == "self-service"
+
+
+def test_without_a_requestor_the_pi_stands_in(project, fake_client):
+    tasks.create_project_users_ticket(project.pk)
+
+    assert fake_client.created[0].caller_id == "asmith02"
+
+
+def test_another_change_the_same_day_files_nothing(project, use_client):
+    existing = Incident(sys_id="i-0", number="INC0000000", state="6")
+    client = use_client(FakeClient(existing=existing))
+
+    assert tasks.create_project_users_ticket(project.pk) == existing
+    assert client.looked_up == [f"coldfront:project-users:{project.pk}:2026-09-28"]
+    assert client.created == [] and client.updated == []
+
+
+def test_a_change_on_a_later_day_files_a_new_notice(project, today, fake_client):
+    tasks.create_project_users_ticket(project.pk)
+    today["today"] = datetime.date(2026, 9, 29)
+    tasks.create_project_users_ticket(project.pk)
+
+    assert [ticket.correlation_id for ticket in fake_client.created] == [
+        f"coldfront:project-users:{project.pk}:2026-09-28",
+        f"coldfront:project-users:{project.pk}:2026-09-29",
+    ]

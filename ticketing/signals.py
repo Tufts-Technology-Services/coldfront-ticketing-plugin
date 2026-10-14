@@ -7,6 +7,7 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     allocation_change_created (AllocationChangeView)       create_allocation_change_ticket
     share_creation_state saved as "success"                resolve_allocation_ticket
     quota_update_state saved as "success"                  resolve_allocation_change_ticket
+    project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
 Requests open a ticket when they're submitted. They're resolved when the storage plugin reports its
 work done, not on approval (decided 2026-10-07): the plugin creates shares and sets quotas in
@@ -39,6 +40,8 @@ from coldfront.core.allocation.views import (
     AllocationCreateView,
     AllocationDetailView,
 )
+from coldfront.core.project.models import ProjectUser
+from coldfront.core.project.signals import project_activate_user, project_remove_user
 from coldfront.core.utils.common import import_from_settings
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
 from django.db.models.signals import post_save
@@ -185,3 +188,41 @@ def applied_quota_change_pk(allocation_pk):
         .values_list("allocation_change_request_id", flat=True)
         .first()
     )
+
+
+# -- Project users: one notice per project, per day ---------------------------------------------
+
+
+@receiver(project_activate_user, dispatch_uid="ticketing-project-user-added")
+@receiver(project_remove_user, dispatch_uid="ticketing-project-user-removed")
+def project_users_changed(sender, project_user_pk, **kwargs):
+    """Queue the project's notice, once per project per request.
+
+    ColdFront sends one signal per user added or removed, so changing five users in one form sends
+    five. The task's per-day correlation_id stops a second ticket only once the first is filed, and
+    five tasks queued together could each look before any had filed; so within a request only the
+    first is queued. Superusers being added or removed are staff, not project members to notify,
+    and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
+    for the new project's PI, and a PI is never otherwise added or removed, so it would only ever
+    tell a new project's PI that its users had changed.
+    """
+    project_user = ProjectUser.objects.select_related("user", "project").get(pk=project_user_pk)
+    if project_user.user.is_superuser or project_user.user_id == project_user.project.pi_id:
+        return
+    if not first_in_request(("project-users", project_user.project_id)):
+        return
+    enqueue_ticket(
+        "ticketing.tasks.create_project_users_ticket", project_user.project_id, requestor_pk=requestor_pk(kwargs)
+    )
+
+
+def first_in_request(key) -> bool:
+    """True the first time `key` is seen during the current request, and always outside one."""
+    request = toggle.current_request()
+    if request is None:
+        return True
+    seen = request.__dict__.setdefault("_ticketing_queued", set())
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
