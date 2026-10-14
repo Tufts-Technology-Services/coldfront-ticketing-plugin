@@ -32,6 +32,7 @@ class Incident:
     # Only filled in by find_incident. Left out of equality: an Incident is identified by sys_id.
     state: str | None = field(default=None, compare=False)
     assigned_to: str | None = field(default=None, compare=False)  # a sys_id; None if unassigned
+    correlation_id: str | None = field(default=None, compare=False)  # only from find_incident_by_number
 
 
 class ServiceNowClient:
@@ -101,12 +102,15 @@ class ServiceNowClient:
         return Incident(sys_id=result["sys_id"], number=result["number"])
 
     def find_incident(self, correlation_id) -> Incident | None:
-        matches = self.find(
-            INCIDENT_TABLE,
-            "correlation_id",
-            correlation_id,
-            return_fields=("sys_id", "number", "state", "assigned_to"),
-        )
+        return self._find_incident("correlation_id", correlation_id)
+
+    def find_incident_by_number(self, number) -> Incident | None:
+        """The incident numbered `number` (e.g. INC0012345), with its correlation_id."""
+        return self._find_incident("number", number, "correlation_id")
+
+    def _find_incident(self, column, value, *extra_fields) -> Incident | None:
+        fields = ("sys_id", "number", "state", "assigned_to", *extra_fields)
+        matches = self.find(INCIDENT_TABLE, column, value, return_fields=fields)
         if not matches:
             return None
         match = matches[0]
@@ -114,8 +118,9 @@ class ServiceNowClient:
             sys_id=match["sys_id"],
             number=match["number"],
             state=match.get("state"),
-            # An empty reference comes back as "".
+            # An empty reference or string comes back as "".
             assigned_to=match.get("assigned_to") or None,
+            correlation_id=match.get("correlation_id") or None,
         )
 
     def update_incident(self, sys_id, fields: dict) -> None:

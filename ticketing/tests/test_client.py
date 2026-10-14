@@ -156,6 +156,34 @@ def test_find_incident_reports_the_assignee(client, api, stored, expected):
     assert client.find_incident("coldfront:allocation:7").assigned_to == expected
 
 
+@pytest.mark.parametrize(("stored", "expected"), [("coldfront:allocation:7", "coldfront:allocation:7"), ("", None)])
+def test_find_incident_by_number_reports_its_correlation_id(client, api, stored, expected):
+    api.get(
+        f"{TABLE}/incident",
+        match=[
+            matchers.query_param_matcher(
+                {
+                    "sysparm_query": "number=INC0000001",
+                    "sysparm_fields": "sys_id,number,state,assigned_to,correlation_id",
+                },
+                strict_match=False,
+            )
+        ],
+        json={"result": [{"sys_id": "i-1", "number": "INC0000001", "state": "1", "correlation_id": stored}]},
+    )
+
+    incident = client.find_incident_by_number("INC0000001")
+
+    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident.correlation_id == expected
+
+
+def test_find_incident_by_number_returns_none_when_absent(client, api):
+    api.get(f"{TABLE}/incident", status=404, json=NO_RECORD)
+
+    assert client.find_incident_by_number("INC0000001") is None
+
+
 def test_find_incident_returns_none_when_absent(client, api):
     api.get(f"{TABLE}/incident", status=404, json=NO_RECORD)
 

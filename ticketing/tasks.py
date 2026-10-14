@@ -15,7 +15,10 @@
 
 Each request lifecycle shares one correlation_id, which is how the resolve task finds the incident
 the create task opened, and how any task that is re-run finds its own earlier work instead of filing
-a duplicate. Nothing is stored locally.
+a duplicate. Each ticket filed, found or resolved is recorded as a FiledTicket (ticketing.models), for
+links from ColdFront's pages; tasks that only file check that record before asking ServiceNow.
+Resolving still asks ServiceNow, which has the incident's current state. The unused group tasks
+record nothing.
 
 Create tasks (_open_request) file an admin-facing description, and leave state and assigned_to unset
 so the incident opens New in the assignment group's queue. Resolve tasks (_resolve_or_file) post a
@@ -46,6 +49,7 @@ from ticketing.allocation_updates import (
     describe_request,
 )
 from ticketing.client import Incident, client_from_settings
+from ticketing.models import FiledTicket
 from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, Ticket, clean_short_description
 
 logger = logging.getLogger(__name__)
@@ -91,6 +95,8 @@ def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
         correlation_id=hpc_account_correlation_id(user.username),
         what=f"HPC account {user.username}",
         people=lambda: _hpc_account_people(user),
+        kind=FiledTicket.Kind.HPC_ACCOUNT,
+        subjects={"user": user},
         describe=lambda requestor: RequestDescription(
             short_description=f"HPC Account Creation | {home_path}",
             description=render_to_string("ticketing/hpc_account_request.txt", {"user": user, "home_path": home_path}),
@@ -114,6 +120,8 @@ def resolve_hpc_account_ticket(username: str, home_path: str) -> Incident:
         correlation_id=hpc_account_correlation_id(user.username),
         what=f"HPC account {user.username}",
         people=lambda: _hpc_account_people(user),
+        kind=FiledTicket.Kind.HPC_ACCOUNT,
+        subjects={"user": user},
         describe=lambda: AllocationUpdate(
             short_description=f"HPC Account Creation | {home_path}",
             comments=render_to_string("ticketing/hpc_account_creation_notification.txt", {"user": user}),
@@ -228,42 +236,42 @@ def project_users_correlation_id(project_pk) -> str:
 
 
 def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None) -> Incident:
-    """File one already-resolved notice that a project's users have changed today.
+    """Tell a project's PI and Approvers that its users have changed today, and close out the ticket.
 
     The message is generic -- it names no users and doesn't say whether they were added or
-    removed -- so one ticket covers every change to the project's users that day: the
-    correlation_id "coldfront:project-users:<project pk>:<YYYY-MM-DD>" (in TIME_ZONE) finds an
-    earlier one, which is returned instead of filing another. People as for allocation requests
-    (_people_fields): whoever made the change is caller and contact, the PI standing in without
-    `requestor_pk`, and the PI and Approvers are watch-listed.
+    removed -- so one ticket covers every change to the project's users that day, found by the
+    correlation_id "coldfront:project-users:<project pk>:<YYYY-MM-DD>" (in TIME_ZONE). Usually there
+    is none yet and one is filed already resolved; later changes that day find it resolved and send
+    nothing. A ticket filed in ServiceNow and linked for the day (ticketing.linking) is still open,
+    and is resolved with the message instead. People as for allocation requests (_people_fields):
+    whoever made the change is caller and contact, the PI standing in without `requestor_pk`, and
+    the PI and Approvers are watch-listed.
     """
     project = Project.objects.select_related("pi").get(pk=project_pk)
     correlation_id = project_users_correlation_id(project.pk)
     what = f"user changes on project {project.pk}"
-    client = client_from_settings()
 
-    existing = client.find_incident(correlation_id)
-    if existing:
-        logger.info("Incident for %s today already filed as %s", what, existing.number)
-        return existing
-
-    _, people_fields = _people_fields(project, requestor_pk)
+    filed = FiledTicket.objects.filter(correlation_id=correlation_id, resolved_at__isnull=False).first()
+    if filed:
+        logger.info("Incident for %s today already filed as %s", what, filed.number)
+        return Incident(sys_id=filed.sys_id, number=filed.number)
     url = build_link(reverse("project-detail", kwargs={"pk": project.pk}))
-    ticket = Ticket(
-        **people_fields,
-        short_description=clean_short_description(f"Project Users Changed | {project.title}"),
-        u_business_service="Research Data Storage",
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
-        assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
-        comments=render_to_string("ticketing/project_users_changed_notification.txt", {"project": project, "url": url}),
+    return _resolve_or_file(
         correlation_id=correlation_id,
-        state=STATE_RESOLVED,
-        close_code=CLOSE_CODE_SOLVED_REMOTELY,
-        close_notes="Project users updated.",
+        what=what,
+        kind=FiledTicket.Kind.PROJECT_USERS,
+        subjects={"project": project},
+        people=lambda: _people_fields(project, requestor_pk),
+        describe=lambda: AllocationUpdate(
+            short_description=clean_short_description(f"Project Users Changed | {project.title}"),
+            comments=render_to_string(
+                "ticketing/project_users_changed_notification.txt", {"project": project, "url": url}
+            ),
+            close_notes="Project users updated.",
+            business_service="Research Data Storage",
+        ),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
-    incident = client.create_incident(ticket)
-    logger.info("Filed %s for %s", incident.number, what)
-    return incident
 
 
 def contact_type_for(user, project) -> str:
@@ -321,16 +329,43 @@ def _people_fields(project, requestor_pk, affected_pk=None):
     return requestor, fields
 
 
-def _open_request(*, correlation_id, what, people, describe, u_action) -> Incident:
+def _filed(correlation_id) -> Incident | None:
+    """The incident recorded locally for `correlation_id`, if any, sparing a ServiceNow lookup."""
+    filed = FiledTicket.objects.filter(correlation_id=correlation_id).first()
+    return Incident(sys_id=filed.sys_id, number=filed.number) if filed else None
+
+
+def _record(incident, correlation_id, kind, subjects, *, resolved=False):
+    """Record `incident` as a FiledTicket, or update the record; `resolved` stamps resolved_at.
+
+    The ticket is already in ServiceNow, so a failure here is logged rather than raised. A later
+    task for the same correlation_id finds it in ServiceNow and records it then.
+    """
+    defaults = {"kind": kind, "number": incident.number, "sys_id": incident.sys_id, **subjects}
+    if resolved:
+        defaults["resolved_at"] = timezone.now()
+    try:
+        FiledTicket.objects.update_or_create(correlation_id=correlation_id, defaults=defaults)
+    except Exception:
+        logger.exception("Filed %s for %s, but couldn't record it locally", incident.number, correlation_id)
+
+
+def _open_request(*, correlation_id, what, kind, subjects, people, describe, u_action) -> Incident:
     """Open an incident for a request, or return the one already filed for it.
 
     `people()` returns (requestor, the Ticket people fields), and `describe(requestor)` the
-    RequestDescription; both are only called if a ticket is needed.
+    RequestDescription; both are only called if a ticket is needed. The incident is recorded as a
+    FiledTicket of `kind` about `subjects` (FiledTicket fields: allocation, project, ...).
     """
+    existing = _filed(correlation_id)
+    if existing:
+        logger.info("Incident for %s already filed as %s", what, existing.number)
+        return existing
     client = client_from_settings()
     existing = client.find_incident(correlation_id)
     if existing:
         logger.info("Incident for %s already filed as %s", what, existing.number)
+        _record(existing, correlation_id, kind, subjects)
         return existing
 
     requestor, people_fields = people()
@@ -347,10 +382,11 @@ def _open_request(*, correlation_id, what, people, describe, u_action) -> Incide
     )
     incident = client.create_incident(ticket)
     logger.info("Filed %s for %s", incident.number, what)
+    _record(incident, correlation_id, kind, subjects)
     return incident
 
 
-def _resolve_or_file(*, correlation_id, what, people, describe, u_action) -> Incident | None:
+def _resolve_or_file(*, correlation_id, what, kind, subjects, people, describe, u_action) -> Incident | None:
     """Resolve the request's incident with a customer message, or file one already resolved.
 
     `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
@@ -360,6 +396,9 @@ def _resolve_or_file(*, correlation_id, what, people, describe, u_action) -> Inc
     A resolved incident always has an assignee. Requests are opened unassigned, so one still
     unassigned is assigned to TICKETING_ASSIGNED_TO as it is resolved; one an admin has picked up
     keeps its assignee.
+
+    Unlike _open_request this always asks ServiceNow, for the incident's current state; the
+    incident is recorded as a FiledTicket as for _open_request.
     """
     try:
         update = describe()
@@ -379,10 +418,12 @@ def _resolve_or_file(*, correlation_id, what, people, describe, u_action) -> Inc
     if existing:
         if existing.state in (STATE_RESOLVED, STATE_CLOSED):
             logger.info("Incident %s for %s is already resolved", existing.number, what)
+            _record(existing, correlation_id, kind, subjects)
         else:
             assignment = {} if existing.assigned_to else {"assigned_to": assignee}
             client.update_incident(existing.sys_id, {**assignment, **resolution})
             logger.info("Resolved %s for %s", existing.number, what)
+            _record(existing, correlation_id, kind, subjects, resolved=True)
         return existing
 
     _, people_fields = people()
@@ -397,6 +438,7 @@ def _resolve_or_file(*, correlation_id, what, people, describe, u_action) -> Inc
     )
     incident = client.create_incident(ticket)
     logger.info("Filed %s for %s", incident.number, what)
+    _record(incident, correlation_id, kind, subjects, resolved=True)
     return incident
 
 
@@ -426,6 +468,8 @@ def create_allocation_ticket(
     return _open_request(
         correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
+        kind=FiledTicket.Kind.ALLOCATION,
+        subjects={"allocation": allocation},
         people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
         describe=lambda requestor: describe_new_allocation(allocation, requestor),
         u_action=U_ACTION_ACTIVATE,
@@ -446,6 +490,8 @@ def resolve_allocation_ticket(
     return _resolve_or_file(
         correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
+        kind=FiledTicket.Kind.ALLOCATION,
+        subjects={"allocation": allocation},
         people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_activation(allocation),
         u_action=U_ACTION_ACTIVATE,
@@ -478,6 +524,8 @@ def create_allocation_change_ticket(
     return _open_request(
         correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
+        kind=FiledTicket.Kind.ALLOCATION_CHANGE,
+        subjects={"allocation_change": change, "allocation": change.allocation},
         people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
         describe=lambda requestor: describe_request(change, requestor),
         u_action=U_ACTION_MOVE_ADD_CHANGE,
@@ -498,6 +546,8 @@ def resolve_allocation_change_ticket(
     return _resolve_or_file(
         correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
+        kind=FiledTicket.Kind.ALLOCATION_CHANGE,
+        subjects={"allocation_change": change, "allocation": change.allocation},
         people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_change(change),
         u_action=U_ACTION_MOVE_ADD_CHANGE,

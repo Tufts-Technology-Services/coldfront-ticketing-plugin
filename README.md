@@ -126,6 +126,39 @@ template must include it, guarded so the template still renders where the plugin
 The switch relies on simple-history's `HistoryRequestMiddleware`, which is in ColdFront's default
 `MIDDLEWARE`. If it's missing, the control shows "Ticket switch unavailable" and refuses to switch.
 
+### Links to filed tickets
+
+Each ticket the plugin files is recorded as a `FiledTicket` (run `manage.py migrate` after
+installing): the incident number and `sys_id`, what it's about, and when the plugin resolved it.
+Superusers can see them in two places:
+
+- **Django admin**, under Ticketing, read-only. This is the only place HPC account tickets show,
+  since ColdFront has no page for a user.
+- **A "ServiceNow Tickets" card** on allocation and project pages, linking each ticket. A project's
+  card includes its allocations' tickets, and an allocation's includes its change requests'. The
+  site's `allocation/allocation_detail.html` and `project/project_detail.html` overrides include it,
+  guarded like the switch:
+
+  ```django
+  {% if ticketing_toggle %}{% include 'ticketing/filed_tickets.html' with subject=allocation %}{% endif %}
+  {% if ticketing_toggle %}{% include 'ticketing/filed_tickets.html' with subject=project %}{% endif %}
+  ```
+
+  The card also has a **"Link a ServiceNow ticket"** form, for requests filed in ServiceNow directly
+  (by email or the portal). Give it the incident number and what it's for (the allocation request, a
+  change request, or today's project user changes): ColdFront then resolves that incident instead of
+  filing its own, and closes any incident it had already opened for the request as a duplicate.
+  The card shows for superusers even with no tickets, for the form.
+
+  **Known issue:** an allocation or change request can only be linked after it's submitted, and
+  submitting already opens ColdFront's request ticket, which emails the PI and Approvers. Linking
+  closes that ticket as a duplicate, but the email has gone. See "Linking tickets filed in
+  ServiceNow" in `docs/plan.md` for a possible fix.
+
+Links are built from `SERVICENOW_URL` when shown, so they follow the instance the site is configured
+for. Records survive deleting what they're about (the link is cleared, the `correlation_id` stays).
+Deleting a record only forgets the link; the ticket stays in ServiceNow.
+
 ## Layout
 
 ```
@@ -136,6 +169,10 @@ ticketing/
   toggle.py     the admin switch, kept in the session
   views.py, urls.py, context_processors.py   the menu-bar control (htmx)
   tasks.py      re-query by pk, build the incident payload, create or resolve via the API
+  models.py     FiledTicket: each ticket filed, what it's about, and its ServiceNow link
+  admin.py      FiledTicket, read-only
+  linking.py    adopt a ticket filed in ServiceNow (the card's link form, LinkTicketView)
+  templatetags/ticketing_tags.py   filed_tickets_for, link_form_for, for the ticket card
   client.py     ServiceNow Table API client (requests)
   tickets.py    Ticket dataclass + incident payload builder (adapted from rt-ticket-utils)
   templates/ticketing/   Django templates for incident description and resolution text
@@ -145,5 +182,3 @@ docs/
   email_usage.md    inventory of ColdFront's existing email behavior
   reference/        verbatim rt-ticket-utils source the vendored code derives from
 ```
-
-Planned addition: `models.py` (allocation / change request → incident mapping).

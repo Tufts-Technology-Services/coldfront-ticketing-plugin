@@ -1,0 +1,74 @@
+{% comment %}
+Card listing the ServiceNow tickets filed about `subject` (an allocation or project), with links, and
+a form to link a ticket filed in ServiceNow directly. Superusers only. Include it guarded on the
+context processor's variable, which only superusers get, so the page still renders on sites without
+this plugin:
+  {% if ticketing_toggle %}{% include 'ticketing/filed_tickets.html' with subject=allocation %}{% endif %}
+{% endcomment %}
+{% load ticketing_tags %}
+{% link_form_for subject as link_form %}
+{% if link_form %}
+{% filed_tickets_for subject as filed_tickets %}
+<div class="card mb-3" id="ticketing-filed-tickets">
+  <div class="card-header">
+    <h3 class="d-inline"><i class="fas fa-ticket-alt" aria-hidden="true"></i> ServiceNow Tickets</h3>
+    <span class="badge bg-secondary">{{ filed_tickets|length }}</span>
+  </div>
+  <div class="card-body">
+    {% if filed_tickets %}
+      <div class="table-responsive">
+        <table class="table table-hover">
+          <thead>
+            <tr>
+              <th scope="col">Ticket</th>
+              <th scope="col">For</th>
+              <th scope="col">Filed</th>
+              <th scope="col">Resolved by ColdFront</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ticket in filed_tickets %}
+              <tr>
+                <td>
+                  <a href="{{ ticket.url }}" target="_blank" rel="noopener noreferrer">{{ ticket.number }}</a>
+                  {% if ticket.source == "linked" %}
+                    <span class="badge bg-info text-dark" title="Filed in ServiceNow{% if ticket.linked_by %}; linked by {{ ticket.linked_by.username }}{% endif %}">linked</span>
+                  {% endif %}
+                </td>
+                <td>{{ ticket.get_kind_display }} <small class="text-muted">{{ ticket.correlation_id }}</small></td>
+                <td>{{ ticket.created }}</td>
+                <td>{{ ticket.resolved_at|default:"-" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-muted">No ServiceNow tickets yet.</p>
+    {% endif %}
+
+    <form method="post" action="{{ link_form.action }}" class="row g-2 align-items-end">
+      {% csrf_token %}
+      <div class="col-auto">
+        <label for="ticketing-link-number" class="form-label">Link a ServiceNow ticket</label>
+        <input type="text" id="ticketing-link-number" name="number" class="form-control" placeholder="INC0000000"
+               pattern="[Ii][Nn][Cc][0-9]+" required>
+      </div>
+      <div class="col-auto">
+        <label for="ticketing-link-target" class="form-label">for</label>
+        <select id="ticketing-link-target" name="target" class="form-select">
+          {% for target in link_form.targets %}
+            <option value="{{ target.correlation_id }}">{{ target.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary"
+                title="ColdFront will resolve this ticket instead of filing its own. If it already opened one, that one is closed as a duplicate.">
+          Link
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
