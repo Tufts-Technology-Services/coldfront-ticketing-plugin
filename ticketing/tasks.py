@@ -1,25 +1,27 @@
 """Task functions that create and resolve ServiceNow incidents. Invoked via django_q async_task.
 
-    task                              for (once triggered)         correlation_id
-    create_hpc_account_ticket         an HPC account is ready      coldfront:hpc-account:<utln>
-    create_group_membership_ticket    a user is added to a group   coldfront:group-add:<group>:<utln>:<date>
-    create_group_removal_ticket       a user leaves a group        coldfront:group-remove:<group>:<utln>:<date>
-    create_allocation_ticket          allocation_new               coldfront:allocation:<pk>
-    resolve_allocation_ticket         allocation_activate          coldfront:allocation:<pk>
-    create_allocation_change_ticket   allocation_change_created    coldfront:allocation-change:<pk>
-    resolve_allocation_change_ticket  allocation_change_approved   coldfront:allocation-change:<pk>
+    task                              for                                  correlation_id
+    create_hpc_account_ticket         an HPC account waits on a UID *      coldfront:hpc-account:<utln>
+    resolve_hpc_account_ticket        an HPC account is created *          coldfront:hpc-account:<utln>
+    create_group_membership_ticket    a user is added to a group *         coldfront:group-add:<group>:<utln>:<date>
+    create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
+    create_allocation_ticket          allocation_new                       coldfront:allocation:<pk>
+    resolve_allocation_ticket         share_creation_state = success       coldfront:allocation:<pk>
+    create_allocation_change_ticket   allocation_change_created            coldfront:allocation-change:<pk>
+    resolve_allocation_change_ticket  quota_update_state = success         coldfront:allocation-change:<pk>
+
+    * not triggered yet (see docs/plan.md); the rest are wired up in ticketing.signals.
 
 Each request lifecycle shares one correlation_id, which is how the resolve task finds the incident
 the create task opened, and how any task that is re-run finds its own earlier work instead of filing
-a duplicate. Nothing is stored locally. Nothing calls these yet: the triggers are deliberately
-deferred (see docs/plan.md).
+a duplicate. Nothing is stored locally.
 
-Create tasks (_open_request) file for every request, supported or not, with an admin-facing
-description, and leave state and assigned_to unset so the incident opens New in the assignment
-group's queue. Resolve tasks (_resolve_or_file) post a customer-facing message chosen by resource
-(ticketing.allocation_updates) as a comment and resolve, assigning the incident to
-TICKETING_ASSIGNED_TO if no one has picked it up; unsupported allocations are left open for an
-admin, and with no incident to resolve they file one already resolved.
+Create tasks (_open_request) file an admin-facing description, and leave state and assigned_to unset
+so the incident opens New in the assignment group's queue. Resolve tasks (_resolve_or_file) post a
+customer-facing message as a comment and resolve, assigning the incident to TICKETING_ASSIGNED_TO if
+no one has picked it up; with no incident to resolve they file one already resolved. Allocation
+messages are chosen by resource (ticketing.allocation_updates); unsupported allocations are left
+open for an admin.
 """
 
 import logging
@@ -31,6 +33,8 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 
 from ticketing.allocation_updates import (
+    AllocationUpdate,
+    RequestDescription,
     UnsupportedUpdate,
     describe_activation,
     describe_change,
@@ -38,7 +42,7 @@ from ticketing.allocation_updates import (
     describe_request,
 )
 from ticketing.client import Incident, client_from_settings
-from ticketing.tickets import Ticket
+from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, Ticket
 
 logger = logging.getLogger(__name__)
 
@@ -53,42 +57,67 @@ U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"
 U_ACTION_ACTIVATE = "Activate/Setup/Install"
 
 
+# -- HPC accounts: opened when the user has no UID yet, resolved when the account is created -----
+
+
+def hpc_account_correlation_id(username) -> str:
+    return f"coldfront:hpc-account:{username}"
+
+
+def _hpc_account_people(user):
+    """The user signed up for the account themselves, so they are contact person and caller."""
+    return user, {
+        "u_contact_person": user.username,
+        "caller_id": user.username,
+        "contact_type": CONTACT_TYPE_SELF_SERVICE,
+    }
+
+
 def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
-    """File an already-resolved incident telling a user their HPC account has been created.
+    """Open an incident for an HPC account that can't be created yet because the user has no UID.
 
-    Mirrors the "HPC Account Creation" incidents staff file today: the welcome text goes in
-    `comments` (the customer-visible journal ServiceNow notifies the caller from), a short staff
-    note in `close_notes`, and the incident is created Resolved so the instance auto-closes it.
-
-    `home_path` is the user's cluster home directory, passed in by whatever provisioned the account
-    so this plugin needn't know the cluster layout. Safe to re-run: an incident already filed for
-    this user (found by correlation_id) is returned instead of filing another.
+    Admin-facing: says who signed up and that the account is waiting on a UID. Opened unassigned
+    with no state, so it waits New in the group queue. resolve_hpc_account_ticket finds it by the
+    shared correlation_id "coldfront:hpc-account:<utln>" once the account exists. `home_path` is the
+    user's cluster home directory, passed in by whatever provisions the account so this plugin
+    needn't know the cluster layout. Safe to re-run.
     """
     user = get_user_model().objects.get(username=username)
-    correlation_id = f"coldfront:hpc-account:{user.username}"
-    client = client_from_settings()
-
-    existing = client.find_incident(correlation_id)
-    if existing:
-        logger.info("HPC account incident for %s already filed as %s", user.username, existing.number)
-        return existing
-
-    ticket = Ticket(
-        u_contact_person=user.username,
-        caller_id=user.username,
-        # The user signed up for the account themselves.
-        contact_type=CONTACT_TYPE_SELF_SERVICE,
-        short_description=f"HPC Account Creation | {home_path}",
-        assigned_to=import_from_settings("TICKETING_ASSIGNED_TO"),
-        comments=render_to_string("ticketing/hpc_account_creation_notification.txt", {"user": user}),
-        correlation_id=correlation_id,
-        state=STATE_RESOLVED,
-        close_code=CLOSE_CODE_SOLVED_REMOTELY,
-        close_notes="Cluster account created!",
+    return _open_request(
+        correlation_id=hpc_account_correlation_id(user.username),
+        what=f"HPC account {user.username}",
+        people=lambda: _hpc_account_people(user),
+        describe=lambda requestor: RequestDescription(
+            short_description=f"HPC Account Creation | {home_path}",
+            description=render_to_string("ticketing/hpc_account_request.txt", {"user": user, "home_path": home_path}),
+            business_service=None,
+        ),
+        u_action=U_ACTION_ACTIVATE,
     )
-    incident = client.create_incident(ticket)
-    logger.info("Filed %s for HPC account %s", incident.number, user.username)
-    return incident
+
+
+def resolve_hpc_account_ticket(username: str, home_path: str) -> Incident:
+    """Welcome the user to their new HPC account, and close out its ticket.
+
+    Mirrors the "HPC Account Creation" incidents staff file today: the welcome text goes in
+    `comments` (the customer-visible journal ServiceNow notifies the caller from) and a short staff
+    note in `close_notes`. Resolves the incident create_hpc_account_ticket opened, if there is one;
+    for the usual account, which had a UID all along, there isn't, so one is filed already
+    resolved. Safe to re-run: an incident already resolved is left alone.
+    """
+    user = get_user_model().objects.get(username=username)
+    return _resolve_or_file(
+        correlation_id=hpc_account_correlation_id(user.username),
+        what=f"HPC account {user.username}",
+        people=lambda: _hpc_account_people(user),
+        describe=lambda: AllocationUpdate(
+            short_description=f"HPC Account Creation | {home_path}",
+            comments=render_to_string("ticketing/hpc_account_creation_notification.txt", {"user": user}),
+            close_notes="Cluster account created!",
+            business_service=DEFAULT_BUSINESS_SERVICE,
+        ),
+        u_action=U_ACTION_ACTIVATE,
+    )
 
 
 def create_group_membership_ticket(
@@ -242,10 +271,11 @@ def _people_fields(project, requestor_pk, affected_pk=None):
     return requestor, fields
 
 
-def _open_request(*, correlation_id, what, project, requestor_pk, affected_pk, describe, u_action) -> Incident:
-    """Open an Active incident for a request, or return the one already filed for it.
+def _open_request(*, correlation_id, what, people, describe, u_action) -> Incident:
+    """Open an incident for a request, or return the one already filed for it.
 
-    `describe(requestor)` returns the RequestDescription; it is only called if a ticket is needed.
+    `people()` returns (requestor, the Ticket people fields), and `describe(requestor)` the
+    RequestDescription; both are only called if a ticket is needed.
     """
     client = client_from_settings()
     existing = client.find_incident(correlation_id)
@@ -253,11 +283,11 @@ def _open_request(*, correlation_id, what, project, requestor_pk, affected_pk, d
         logger.info("Incident for %s already filed as %s", what, existing.number)
         return existing
 
-    requestor, people = _people_fields(project, requestor_pk, affected_pk)
+    requestor, people_fields = people()
     request = describe(requestor)
     business_service = {"u_business_service": request.business_service} if request.business_service else {}
     ticket = Ticket(
-        **people,
+        **people_fields,
         short_description=request.short_description,
         description=request.description,
         u_action=u_action,
@@ -270,9 +300,7 @@ def _open_request(*, correlation_id, what, project, requestor_pk, affected_pk, d
     return incident
 
 
-def _resolve_or_file(
-    *, correlation_id, what, project, requestor_pk, affected_pk, describe, u_action
-) -> Incident | None:
+def _resolve_or_file(*, correlation_id, what, people, describe, u_action) -> Incident | None:
     """Resolve the request's incident with a customer message, or file one already resolved.
 
     `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
@@ -307,9 +335,9 @@ def _resolve_or_file(
             logger.info("Resolved %s for %s", existing.number, what)
         return existing
 
-    _, people = _people_fields(project, requestor_pk, affected_pk)
+    _, people_fields = people()
     ticket = Ticket(
-        **people,
+        **people_fields,
         short_description=update.short_description,
         u_business_service=update.business_service,
         u_action=u_action,
@@ -348,9 +376,7 @@ def create_allocation_ticket(
     return _open_request(
         correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
-        project=allocation.project,
-        requestor_pk=requestor_pk,
-        affected_pk=affected_pk,
+        people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
         describe=lambda requestor: describe_new_allocation(allocation, requestor),
         u_action=U_ACTION_ACTIVATE,
     )
@@ -370,9 +396,7 @@ def resolve_allocation_ticket(
     return _resolve_or_file(
         correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
-        project=allocation.project,
-        requestor_pk=requestor_pk,
-        affected_pk=affected_pk,
+        people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_activation(allocation),
         u_action=U_ACTION_ACTIVATE,
     )
@@ -404,9 +428,7 @@ def create_allocation_change_ticket(
     return _open_request(
         correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
-        project=change.allocation.project,
-        requestor_pk=requestor_pk,
-        affected_pk=affected_pk,
+        people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
         describe=lambda requestor: describe_request(change, requestor),
         u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
@@ -426,9 +448,7 @@ def resolve_allocation_change_ticket(
     return _resolve_or_file(
         correlation_id=change_correlation_id(change.pk),
         what=f"allocation change {change.pk}",
-        project=change.allocation.project,
-        requestor_pk=requestor_pk,
-        affected_pk=affected_pk,
+        people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_change(change),
         u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
