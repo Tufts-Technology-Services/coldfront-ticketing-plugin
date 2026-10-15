@@ -50,6 +50,12 @@ the approving admin's switch isn't visible, so approving with the switch off lea
 `ticketing_suppressed` marker on the allocation and that request's resolve is skipped. See
 "Triggers" in `docs/plan.md`.
 
+**Not yet resolved automatically:** allocations on non-Storage resources, Storage change requests
+with no quota change (an end-date extension, say), and failed storage jobs. Their incidents stay
+open for an admin; a ticketing admin's request in this group files nothing. Resolving them on
+approval, and filing an admin-only ticket when a storage job fails, is planned. See "Requests the
+storage plugin doesn't finish" in `docs/plan.md`.
+
 **Project user notices are once per calendar day, by design.** The first add or remove on a project
 files a generic, already-resolved notice ("the users on your project have changed"). Every later
 change to that project's users the same day files nothing. That includes a removal after a morning
