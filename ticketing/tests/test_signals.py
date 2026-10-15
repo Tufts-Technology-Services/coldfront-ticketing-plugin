@@ -262,6 +262,68 @@ def test_other_attributes_saved_as_success_are_ignored(pi, queued, committed):
     assert queued == []
 
 
+# -- What storage doesn't provision resolves on approval -----------------------------------------
+
+
+def test_approving_a_storage_allocation_waits_for_storage(pi, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == []
+
+
+def test_activating_a_non_storage_allocation_resolves_it(pi, admin, in_request, queued, committed):
+    allocation = make_cluster_allocation(pi)
+    in_request(admin)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
+    assert markers(allocation) == []
+
+
+def test_approving_a_quota_change_waits_for_storage(pi, admin, in_request, queued, committed):
+    change = approve(make_storage_change(pi))
+    in_request(admin)
+
+    with committed():
+        allocation_change_approved.send(
+            sender=AllocationChangeDetailView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
+
+    assert queued == []
+
+
+def test_approving_a_change_storage_wont_apply_resolves_it(pi, admin, in_request, queued, committed):
+    change = approve(make_storage_change(pi))
+    change.allocationattributechangerequest_set.all().delete()  # an end-date extension, say
+    in_request(admin)
+
+    with committed():
+        allocation_change_approved.send(
+            sender=AllocationChangeDetailView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
+
+    assert queued == [("ticketing.tasks.resolve_allocation_change_ticket", (change.pk,), {})]
+
+
+def test_with_ticketing_off_a_non_storage_activation_resolves_nothing_and_leaves_no_marker(
+    pi, admin, in_request, queued, committed
+):
+    allocation = make_cluster_allocation(pi)
+    in_request(admin, off=True)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == []
+    assert markers(allocation) == []
+
+
 # -- An admin with ticketing off approves: the resolve is skipped --------------------------------
 
 
@@ -355,7 +417,7 @@ def test_a_marker_only_skips_its_own_request(pi, admin, in_request, queued, comm
 
 
 def test_a_marker_that_cant_be_saved_is_logged_and_the_resolve_goes_ahead(pi, admin, in_request, caplog):
-    allocation = make_cluster_allocation(pi)  # no "Text" attribute type exists to build the marker from
+    allocation, _ = make_storage_allocation(pi, path=None)  # no "Text" attribute type to build the marker from
     in_request(admin, off=True)
 
     allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)

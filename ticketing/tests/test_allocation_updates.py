@@ -1,10 +1,20 @@
+import datetime
+
 import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 
 from ticketing import tasks
-from ticketing.allocation_updates import UnsupportedUpdate, describe_change
+from ticketing.allocation_updates import (
+    UnsupportedUpdate,
+    describe_activation,
+    describe_change,
+    describe_new_allocation,
+    describe_request,
+    human_name,
+    storage_will_provision,
+)
 from ticketing.client import Incident, UnknownReference
 
 pytestmark = pytest.mark.django_db
@@ -17,14 +27,15 @@ def make_storage_allocation(pi, *, resource_name="Research Storage", quota="10",
     allocation.resources.add(resource)
     quota_attr = f.AllocationAttributeFactory(
         allocation=allocation,
-        allocation_attribute_type=f.AllocationAttributeTypeFactory(name="Storage Quota (TB)"),
+        # Public, since customers see them; ColdFront's model default is private.
+        allocation_attribute_type=f.AllocationAttributeTypeFactory(name="Storage Quota (TB)", is_private=False),
         value=quota,
     )
     if path:
         f.AllocationAttributeFactory(
             allocation=allocation,
             allocation_attribute_type=f.AllocationAttributeTypeFactory(
-                name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text")
+                name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text"), is_private=False
             ),
             value=path,
         )
@@ -44,7 +55,7 @@ def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="
 
 
 def make_cluster_allocation(pi):
-    """An allocation on a resource type with no customer message (only Storage has one today)."""
+    """An allocation on a resource type the storage plugin doesn't provision; it gets the generic message."""
     resource = f.ResourceFactory(name="Research Cluster", resource_type=f.ResourceTypeFactory(name="Cluster"))
     allocation = f.AllocationFactory(project=f.ProjectFactory(pi=pi))
     allocation.resources.add(resource)
@@ -101,22 +112,158 @@ def test_resource_specific_template_wins_over_the_type_template(pi, settings, tm
     assert update.comments == "RStore says 10 TB -> 20 TB on rt-lab-share"
 
 
-def test_change_without_a_quota_change_is_unsupported(pi):
+def test_a_storage_change_without_a_quota_change_gets_the_generic_message(pi):
     change = make_storage_change(pi)
     change.allocationattributechangerequest_set.all().delete()
+    change.end_date_extension = 90
+    change.save()
 
-    with pytest.raises(UnsupportedUpdate, match="no Storage Quota"):
-        describe_change(change)
+    update = describe_change(change)
+
+    assert update.short_description == f"Research Storage: Allocation Change | {change.allocation.project.title}"
+    assert "- End date extended by 90 days, to " in update.comments
+    assert "quota" not in update.comments.lower()  # not storage.txt's wording
+    assert update.business_service == "Research Data Storage"
+    assert update.close_notes == "Allocation change applied."
 
 
-def test_unknown_resource_type_is_unsupported(pi):
-    change = make_storage_change(pi)
+def test_other_resource_types_get_the_generic_change_message(pi):
+    change = make_storage_change(pi, old="10", new="20")
     resource = change.allocation.resources.first()
     resource.resource_type = f.ResourceTypeFactory(name="Cluster")
     resource.save()
 
-    with pytest.raises(UnsupportedUpdate, match="'Cluster'"):
+    update = describe_change(change)
+
+    assert "have been applied:\n- Storage Quota (TB): 10 -> 20\n" in update.comments
+    assert update.business_service == "High Performance Computing (HPC)"
+
+
+def cluster_change(pi, *private):
+    """A change request on a Cluster allocation, changing Core Usage (Hours) 1000 -> 2000 and any
+    `private` attributes (each to "secret")."""
+    allocation = make_cluster_allocation(pi)
+    change = f.AllocationChangeRequestFactory(allocation=allocation)
+    for name, is_private, new in [("Core Usage (Hours)", False, "2000")] + [(n, True, "secret") for n in private]:
+        attribute = f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=is_private),
+            value="1000" if not is_private else "hidden",
+        )
+        f.AllocationAttributeChangeRequestFactory(
+            allocation_change_request=change, allocation_attribute=attribute, new_value=new
+        )
+        attribute.value = new  # what approval does
+        attribute.save()
+    return change
+
+
+def test_the_generic_change_message_leaves_out_private_attributes(pi):
+    comments = describe_change(cluster_change(pi, "internal_quota")).comments
+
+    assert "- Core Usage (Hours): 1000 -> 2000\n" in comments
+    assert "internal_quota" not in comments and "secret" not in comments and "hidden" not in comments
+
+
+def test_a_change_to_only_private_attributes_lists_nothing(pi):
+    change = cluster_change(pi, "internal_quota")
+    change.allocationattributechangerequest_set.filter(
+        allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
+    ).delete()
+
+    comments = describe_change(change).comments
+
+    assert f"for project {change.allocation.project.title} have been applied.\n" in comments
+    assert "internal_quota" not in comments and "- " not in comments
+
+
+def test_an_allocation_with_no_resource_is_unsupported(pi):
+    change = make_storage_change(pi)
+    change.allocation.resources.clear()
+
+    with pytest.raises(UnsupportedUpdate, match="has no resource"):
         describe_change(change)
+
+
+# -- human_name ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("slurm_account_name", "Slurm account name"),
+        ("slurm-account-name", "Slurm account name"),
+        ("slurmAccountName", "Slurm account name"),
+        ("SlurmAccountName", "Slurm account name"),
+        # known terms
+        ("freeipa_group", "FreeIPA group"),
+        ("share_creation_task_id", "Share creation task ID"),
+        ("gpu_hours", "GPU hours"),
+        ("cloud_account_2fa", "Cloud account 2FA"),
+        ("parent_slurm_account", "Parent Slurm account"),
+        ("utln_list", "Utln list"),  # site terms come from the setting
+        ("unix_GID", "Unix GID"),
+        ("video_id", "Video ID"),  # whole words only: "video" isn't touched
+        # a run of capitals before a capitalized word
+        ("SupportersQOSExpireDate", "Supporters QOS expire date"),
+        ("SupportersQOS", "Supporters QOS"),
+        ("GPUHours", "GPU hours"),
+        # all in capitals: ordinary words, known terms still written their way
+        ("CLOUD_USAGE_NOTIFICATION", "Cloud usage notification"),
+        ("SLURM_GPU_LIMIT", "Slurm GPU limit"),
+        # other capitals kept
+        ("unix_XYZ", "Unix XYZ"),
+        ("Storage_Group_Name", "Storage group name"),
+        ("reported_quota_bytes", "Reported quota bytes"),
+        ("slurm_user_specs_attriblist", "Slurm user specs attriblist"),
+        # already for people, or nothing to split: left alone
+        ("Storage Quota (TB)", "Storage Quota (TB)"),
+        ("Core Usage (Hours)", "Core Usage (Hours)"),
+        ("EXPIRE NOTIFICATION", "EXPIRE NOTIFICATION"),
+        ("quota", "quota"),
+        ("GPU", "GPU"),
+        ("_", "_"),
+    ],
+)
+def test_human_name(name, expected):
+    assert human_name(name) == expected
+
+
+def test_sites_add_known_terms(settings):
+    settings.TICKETING_KNOWN_TERMS = ["UTLN", "RStore", "NetApp", "XSEDE"]
+
+    assert human_name("rstore_share") == "RStore share"
+    assert human_name("pi_utln") == "PI UTLN"
+    assert human_name("netapp_volume") == "NetApp volume"
+    assert human_name("xsede_allocation_id") == "XSEDE allocation ID"  # and the defaults still apply
+
+
+def test_sites_respell_a_default_term(settings):
+    settings.TICKETING_KNOWN_TERMS = ["SLURM"]
+
+    assert human_name("parent_slurm_account") == "Parent SLURM account"
+
+
+# -- storage_will_provision ----------------------------------------------------------------------
+
+
+def test_storage_provisions_a_storage_allocation_and_its_quota_changes(pi):
+    change = make_storage_change(pi)
+
+    assert storage_will_provision(change.allocation)
+    assert storage_will_provision(change.allocation, change)
+
+
+def test_storage_doesnt_apply_a_change_without_a_quota_change(pi):
+    change = make_storage_change(pi)
+    change.allocationattributechangerequest_set.all().delete()
+
+    assert not storage_will_provision(change.allocation, change)
+
+
+def test_storage_doesnt_provision_other_resource_types_or_none(pi):
+    assert not storage_will_provision(make_cluster_allocation(pi))
+    assert not storage_will_provision(f.AllocationFactory(project=f.ProjectFactory(pi=pi)))
 
 
 # -- resolve_allocation_change_ticket ----------------------------------------------------------
@@ -191,7 +338,7 @@ def test_without_a_requestor_the_pi_is_the_caller(pi, use_client):
 
 def test_unsupported_change_leaves_servicenow_alone(pi, use_client):
     change = make_storage_change(pi)
-    change.allocationattributechangerequest_set.all().delete()
+    change.allocation.resources.clear()
     client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="2")))
 
     assert tasks.resolve_allocation_change_ticket(change.pk) is None
@@ -454,6 +601,51 @@ def test_every_new_allocation_gets_a_request_ticket(pi, use_client):
     assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # Ticket default
 
 
+def test_the_new_allocation_request_description_leaves_out_private_attributes(pi, requestor):
+    allocation = make_cluster_allocation(pi)
+    for name, value, private in [("slurm_account_name", "smith_lab", False), ("internal_note", "hidden", True)]:
+        f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=private),
+            value=value,
+        )
+
+    description = describe_new_allocation(allocation, requestor).description
+
+    assert "- Slurm account name: smith_lab" in description
+    assert "internal_note" not in description and "hidden" not in description
+
+
+def test_the_change_request_description_leaves_out_private_attributes(pi, requestor):
+    description = describe_request(cluster_change(pi, "internal_quota"), requestor).description
+
+    assert "- Core Usage (Hours): 2000 -> 2000" in description  # values as stored; approval already applied
+    assert "internal_quota" not in description and "secret" not in description
+
+
+def test_a_change_request_of_only_private_attributes_says_why_none_are_shown(pi, requestor):
+    change = cluster_change(pi, "internal_quota")
+    change.allocationattributechangerequest_set.filter(
+        allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
+    ).delete()
+
+    description = describe_request(change, requestor).description
+
+    assert "- (none shown here; private attributes are left out, see ColdFront)" in description
+
+
+def test_a_private_quota_still_names_the_quota_in_the_short_description(pi, requestor):
+    change = make_storage_change(pi, old="10", new="20")
+    quota_type = change.allocationattributechangerequest_set.get().allocation_attribute.allocation_attribute_type
+    quota_type.is_private = True
+    quota_type.save()
+
+    request = describe_request(change, requestor)
+
+    assert request.short_description == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
+    assert "Storage Quota (TB)" not in request.description
+
+
 def test_new_allocation_request_rerun_returns_the_existing_incident(pi, use_client):
     allocation, _ = make_storage_allocation(pi)
     snow = use_client(FakeServiceNow())
@@ -606,13 +798,46 @@ def test_without_history_users_there_is_no_approver(pi):
     assert tasks.admin_request_approver(allocation, "Active") is None
 
 
-def test_activation_of_an_unsupported_allocation_leaves_its_incident_open(pi, use_client):
+def test_activation_of_a_non_storage_allocation_resolves_with_the_generic_message(pi, use_client):
     allocation = make_cluster_allocation(pi)
     snow = use_client(FakeServiceNow())
 
     tasks.create_allocation_ticket(allocation.pk)
-    assert tasks.resolve_allocation_ticket(allocation.pk) is None
+    tasks.resolve_allocation_ticket(allocation.pk)
 
     [(incident, fields)] = snow.incidents.values()
-    assert incident.state == "2"
-    assert "comments" not in fields or fields["comments"] is None
+    assert incident.state == "6"
+    assert (
+        f"Your new allocation of Research Cluster for project {allocation.project.title} is now active."
+        in fields["comments"]
+    )
+    assert fields["close_notes"] == "Allocation activated."
+
+
+def test_the_generic_activation_message_shows_the_end_date_and_public_attributes(pi):
+    allocation = make_cluster_allocation(pi)
+    allocation.end_date = datetime.date(2027, 6, 30)
+    allocation.save()
+    for name, value, private in [
+        ("slurm_account_name", "smith_lab", False),
+        ("Core Usage (Hours)", "5000", False),
+        ("internal_note", "do not show", True),
+    ]:
+        f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=private),
+            value=value,
+        )
+
+    comments = describe_activation(allocation).comments
+
+    assert "It runs until June 30, 2027." in comments
+    assert "Allocation details:\n- Core Usage (Hours): 5000\n- Slurm account name: smith_lab\n" in comments
+    assert "internal_note" not in comments and "do not show" not in comments
+
+
+def test_the_generic_activation_message_without_attributes_has_no_details_section(pi):
+    comments = describe_activation(make_cluster_allocation(pi)).comments
+
+    assert "Allocation details" not in comments
+    assert "is now active.\n" in comments

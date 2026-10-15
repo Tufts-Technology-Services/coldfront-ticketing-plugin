@@ -26,8 +26,9 @@ Create tasks (_open_request) file an admin-facing description, and leave state a
 so the incident opens New in the assignment group's queue. Resolve tasks (_resolve_or_file) post a
 customer-facing message as a comment and resolve, assigning the incident to TICKETING_ASSIGNED_TO if
 no one has picked it up; with no incident to resolve they file one already resolved. Allocation
-messages are chosen by resource (ticketing.allocation_updates); unsupported allocations are left
-open for an admin.
+messages are chosen by resource (ticketing.allocation_updates), with a generic message for
+resources that have none of their own; only an allocation with no resource is left open for an
+admin.
 """
 
 import logging
@@ -53,6 +54,7 @@ from ticketing.allocation_updates import (
     describe_change,
     describe_new_allocation,
     describe_request,
+    resource_label,
 )
 from ticketing.client import Incident, UnknownReference, client_from_settings
 from ticketing.models import FiledTicket
@@ -66,6 +68,7 @@ logger = logging.getLogger(__name__)
 STATE_ACTIVE = "2"
 STATE_RESOLVED = "6"
 STATE_CLOSED = "7"
+DONE_STATES = (STATE_RESOLVED, STATE_CLOSED)  # nothing more to send
 CLOSE_CODE_SOLVED_REMOTELY = "Solved Remotely (Permanently)"
 CONTACT_TYPE_SELF_SERVICE = "self-service"
 CONTACT_TYPE_EMAIL = "email"
@@ -368,9 +371,11 @@ def admin_request_approver(request, approved_status) -> str | None:
 
 
 def _known_user(client, utln, what) -> str:
-    """`utln` if ServiceNow has that user, else TICKETING_ASSIGNED_TO (logged). The lookup is cached,
-    so building the payload doesn't repeat it."""
+    """`utln` if ServiceNow has that user, else TICKETING_ASSIGNED_TO (logged if `utln` was given).
+    The lookup is cached, so building the payload doesn't repeat it."""
     service_account = import_from_settings("TICKETING_ASSIGNED_TO")
+    if not utln:
+        return service_account
     try:
         client.sys_id_for(*REFERENCE_FIELDS["assigned_to"], utln)
     except UnknownReference:
@@ -385,15 +390,28 @@ def _filed(correlation_id) -> Incident | None:
     return Incident(sys_id=filed.sys_id, number=filed.number) if filed else None
 
 
-def _record(incident, correlation_id, kind, subjects, *, resolved=False):
-    """Record `incident` as a FiledTicket, or update the record; `resolved` stamps resolved_at.
+def default_assignment(incident) -> dict:
+    """The update that gives a resolved `incident` an assignee: TICKETING_ASSIGNED_TO, unless someone
+    has picked it up already (then nothing)."""
+    return {} if incident.assigned_to else {"assigned_to": import_from_settings("TICKETING_ASSIGNED_TO")}
+
+
+def _resolution(close_notes, comments=None) -> dict:
+    """The fields that resolve an incident; `comments` is the customer message, if any."""
+    fields = {"state": STATE_RESOLVED, "close_code": CLOSE_CODE_SOLVED_REMOTELY, "close_notes": close_notes}
+    return {**fields, "comments": comments} if comments else fields
+
+
+def _record(incident, correlation_id, kind, subjects, *, resolved=None):
+    """Record `incident` as a FiledTicket, or update the record. `resolved` True stamps resolved_at,
+    False clears it (reopened), and None leaves it alone.
 
     The ticket is already in ServiceNow, so a failure here is logged rather than raised. A later
     task for the same correlation_id finds it in ServiceNow and records it then.
     """
     defaults = {"kind": kind, "number": incident.number, "sys_id": incident.sys_id, **subjects}
-    if resolved:
-        defaults["resolved_at"] = timezone.now()
+    if resolved is not None:
+        defaults["resolved_at"] = timezone.now() if resolved else None
     try:
         FiledTicket.objects.update_or_create(correlation_id=correlation_id, defaults=defaults)
     except Exception:
@@ -420,15 +438,14 @@ def _open_request(*, correlation_id, what, kind, subjects, people, describe, u_a
 
     requestor, people_fields = people()
     request = describe(requestor)
-    business_service = {"u_business_service": request.business_service} if request.business_service else {}
     ticket = Ticket(
         **people_fields,
         short_description=request.short_description,
         description=request.description,
+        u_business_service=request.business_service,
         u_action=u_action,
         # No assigned_to: the request waits in the assignment group's queue for an admin.
         correlation_id=correlation_id,
-        **business_service,
     )
     incident = client.create_incident(ticket)
     logger.info("Filed %s for %s", incident.number, what)
@@ -460,26 +477,20 @@ def _resolve_or_file(
         logger.info("No customer message for %s: %s", what, e)
         return None
 
-    resolution = {
-        "state": STATE_RESOLVED,
-        "close_code": CLOSE_CODE_SOLVED_REMOTELY,
-        "close_notes": update.close_notes,
-        "comments": update.comments,
-    }
+    resolution = _resolution(update.close_notes, update.comments)
     client = client_from_settings()
     existing = client.find_incident(correlation_id)
-    if existing and existing.state in (STATE_RESOLVED, STATE_CLOSED):
+    if existing and existing.state in DONE_STATES:
         logger.info("Incident %s for %s is already resolved", existing.number, what)
         _record(existing, correlation_id, kind, subjects)
         return existing
 
-    service_account = import_from_settings("TICKETING_ASSIGNED_TO")
     chosen = assignee() if assignee else None
     if chosen:
         chosen = _known_user(client, chosen, what)
 
     if existing:
-        assignment = {"assigned_to": chosen or service_account} if chosen or not existing.assigned_to else {}
+        assignment = {"assigned_to": chosen} if chosen else default_assignment(existing)
         client.update_incident(existing.sys_id, {**assignment, **resolution})
         logger.info("Resolved %s for %s", existing.number, what)
         incident = existing
@@ -490,7 +501,7 @@ def _resolve_or_file(
             short_description=update.short_description,
             u_business_service=update.business_service,
             u_action=u_action,
-            assigned_to=chosen or service_account,
+            assigned_to=chosen or _known_user(client, None, what),
             correlation_id=correlation_id,
             **resolution,
         )
@@ -516,7 +527,7 @@ def create_allocation_ticket(
 ) -> Incident:
     """Open an incident for a newly requested allocation.
 
-    Every allocation request gets one, supported or not (see describe_new_allocation): once core's
+    Every allocation request gets one (see describe_new_allocation): once core's
     ticket emails are gated off it is the only ticket admins get. resolve_allocation_ticket finds it
     by the shared correlation_id "coldfront:allocation:<pk>". Opened with no state, so the instance
     starts it Active. The requestor is the contact person, and `affected_pk` the affected client if
@@ -539,8 +550,9 @@ def resolve_allocation_ticket(
 ) -> Incident | None:
     """Tell the requester their allocation is active, and close out its ticket.
 
-    The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
-    is supported today, and anything else is left open for an admin. With no incident to resolve, a
+    The message depends on the allocation's resource (ticketing.allocation_updates): Storage's, or
+    the generic one; an allocation with no resource is left open for an admin. Queued on storage
+    success, or on activation when storage won't provision it. With no incident to resolve, a
     new one is filed already resolved. `requestor_pk` and `affected_pk` only matter then -- without
     them the PI is the caller. If a ticketing admin submitted the request, it is assigned to the admin who
     activated it (admin_request_approver). Safe to re-run.
@@ -574,9 +586,8 @@ def create_allocation_change_ticket(
 ) -> Incident:
     """Open an incident for a newly submitted allocation change request.
 
-    Every change request gets one, supported or not (see describe_request); only supported changes
-    are later resolved automatically by resolve_allocation_change_ticket, which finds this incident
-    by the shared correlation_id "coldfront:allocation-change:<pk>". Opened with no state, so the
+    Every change request gets one (see describe_request); resolve_allocation_change_ticket later
+    finds it by the shared correlation_id "coldfront:allocation-change:<pk>". Opened with no state, so the
     instance starts it Active. The requestor is the contact person, and `affected_pk` the affected
     client if it isn't them (see _people_fields). Safe to re-run.
     """
@@ -597,8 +608,9 @@ def resolve_allocation_change_ticket(
 ) -> Incident | None:
     """Tell the requester their approved allocation change has been made, and close out its ticket.
 
-    The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
-    quota changes are supported today, and anything else is left open for an admin. With no
+    The message depends on the allocation's resource (ticketing.allocation_updates): Storage's for
+    a quota change, else the generic one listing what changed; an allocation with no resource is left
+    open for an admin. Queued on storage success, or on approval when storage won't apply it. With no
     incident to resolve, a new one is filed already resolved. `requestor_pk` and `affected_pk` only
     matter then -- without them the PI is the caller. If a ticketing admin submitted the request, it
     is assigned to the admin who approved it (admin_request_approver). Safe to re-run.
@@ -651,7 +663,7 @@ def _storage_job(allocation_pk, allocation_change_pk) -> _StorageJob:
             correlation_id=change_correlation_id(change.pk),
             what=f"allocation change {change.pk}",
             job="Quota change",
-            url=build_link(reverse("allocation-change-detail", kwargs={"pk": change.pk})),
+            url=build_link(change.get_absolute_url()),
             subjects={"allocation_change": change, "allocation": change.allocation},
             u_action=U_ACTION_MOVE_ADD_CHANGE,
         )
@@ -663,7 +675,7 @@ def _storage_job(allocation_pk, allocation_change_pk) -> _StorageJob:
         correlation_id=allocation_correlation_id(allocation.pk),
         what=f"allocation {allocation.pk}",
         job="Share creation",
-        url=build_link(reverse("allocation-detail", kwargs={"pk": allocation.pk})),
+        url=build_link(allocation.get_absolute_url()),
         subjects={"allocation": allocation},
         u_action=U_ACTION_ACTIVATE,
     )
@@ -697,21 +709,21 @@ def file_storage_failure_ticket(
         if existing.state == STATE_CLOSED:
             logger.warning("%s failed again (%s), but its ticket %s is closed", what, state, existing.number)
             return existing
-        fields = {"work_notes": f"{job.job} failed again: {state}"}
-        if existing.state == STATE_RESOLVED:
-            fields["state"] = STATE_ACTIVE
-        client.update_incident(existing.sys_id, fields)
+        reopen = existing.state == STATE_RESOLVED
+        note = {"work_notes": f"{job.job} failed again: {state}"}
+        client.update_incident(existing.sys_id, {**note, "state": STATE_ACTIVE} if reopen else note)
         logger.info("Noted a repeat failure of %s on %s", what, existing.number)
-        _record(existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects)
-        FiledTicket.objects.filter(correlation_id=correlation_id).update(resolved_at=None)
+        _record(
+            existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects, resolved=False if reopen else None
+        )
         return existing
 
-    parent = client.find_incident(job.correlation_id)
+    parent = _filed(job.correlation_id) or client.find_incident(job.correlation_id)
     approver = request_approver(job.request, job.approved_status)
-    person = _known_user(client, approver, what) if approver else import_from_settings("TICKETING_ASSIGNED_TO")
+    person = _known_user(client, approver, what)
     allocation = job.allocation
     resource = allocation.get_parent_resource
-    label = resource.name if resource else f"Allocation {allocation.pk}"
+    label = resource_label(allocation, resource)
     context = {
         "job": job.job,
         "state": state,
@@ -752,17 +764,10 @@ def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int
     correlation_id = storage_failure_correlation_id(job.correlation_id)
     client = client_from_settings()
     existing = client.find_incident(correlation_id)
-    if existing is None or existing.state in (STATE_RESOLVED, STATE_CLOSED):
+    if existing is None or existing.state in DONE_STATES:
         return existing
-    assignment = {} if existing.assigned_to else {"assigned_to": import_from_settings("TICKETING_ASSIGNED_TO")}
     client.update_incident(
-        existing.sys_id,
-        {
-            **assignment,
-            "state": STATE_RESOLVED,
-            "close_code": CLOSE_CODE_SOLVED_REMOTELY,
-            "close_notes": f"{job.job} succeeded on a later attempt.",
-        },
+        existing.sys_id, {**default_assignment(existing), **_resolution(f"{job.job} succeeded on a later attempt.")}
     )
     logger.info("Resolved %s for the storage job for %s", existing.number, job.what)
     _record(existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects, resolved=True)

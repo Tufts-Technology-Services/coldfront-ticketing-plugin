@@ -40,15 +40,15 @@ settings).
 | New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident, unless a ticketing admin submitted it |
 | Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
 | Storage job failed | `post_save`: either state = `failed...` | `AllocationAttribute` | File an admin-only child of the request's incident; a later success resolves it |
-| Allocation or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | Nothing, unless the approving admin's switch is off (see below) |
+| Allocation activated, or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | If storage won't provision it (non-Storage resources; Storage changes with no quota change), resolve the request's incident with a generic message. Otherwise nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 
 A sender view also matches its subclasses: the storage plugin, for one, replaces
 `AllocationCreateView` with its own subclass, so matching the class exactly would depend on the
 order of `INSTALLED_APPS`.
 
-**Requests resolve on storage success, not on approval.** The storage plugin creates shares and
-sets quotas in background tasks after approval, and records each outcome in an allocation
+**Storage requests resolve on storage success, not on approval.** The storage plugin creates
+shares and sets quotas in background tasks after approval, and records each outcome in an allocation
 attribute. Resolving on approval could tell the customer "done" before, or despite, a failure. A
 failure leaves the incident open, and files a child ticket with only the approving admin on it, so
 no customer is emailed; it says what failed and how to run the job again. The resolve runs in the
@@ -56,9 +56,11 @@ storage plugin's task, where the approving admin's switch isn't visible, so appr
 switch off leaves a private `ticketing_suppressed` marker on the allocation and that request's
 resolve is skipped. See "Triggers" in `docs/plan.md`.
 
-**Not yet resolved automatically:** allocations on non-Storage resources, and Storage change
-requests with no quota change (an end-date extension, say). Their incidents stay open for an admin;
-a ticketing admin's request in this group files nothing. Resolving them on approval is planned. See
+**Everything else resolves on approval:** allocations on non-Storage resources, and Storage change
+requests with no quota change (an end-date extension, say). The storage plugin does nothing for
+them, so there's no outcome to wait for. They get a generic message: `allocation_new/generic.txt`
+or `allocation_change/generic.txt`, unless a template named after the resource or its type exists.
+Which way a request goes copies the storage plugin's own rule (`storage_will_provision`); see
 "Requests the storage plugin doesn't finish" in `docs/plan.md`.
 
 **Project user notices are once per calendar day, by design.** The first add or remove on a project
@@ -95,6 +97,10 @@ INSTALLED_APPS += ["ticketing"]
 
 TICKETING_ENABLE_SIGNALS = True
 TICKETING_ASSIGNED_TO = "<service-account-utln>"  # assignee of resolved tickets
+# Tickets show attribute names like slurm_account_name as words ("Slurm account name"), writing
+# known terms their own way ("GPU", "FreeIPA"; see KNOWN_TERMS in ticketing/allocation_updates.py).
+# Add terms, or respell a default:
+# TICKETING_KNOWN_TERMS = ["NetApp", "SLURM"]
 # Only if the storage plugin's SHARE_CREATION_STATE_ATTRIBUTE_NAME / QUOTA_UPDATE_STATE_ATTRIBUTE_NAME
 # are overridden; these must match them.
 # TICKETING_SHARE_STATE_ATTRIBUTE = "share_creation_state"

@@ -7,22 +7,27 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     allocation_change_created (AllocationChangeView)       create_allocation_change_ticket
     share_creation_state saved as "success"                resolve_allocation_ticket
     quota_update_state saved as "success"                  resolve_allocation_change_ticket
+    allocation_activate, if storage won't provision        resolve_allocation_ticket
+    allocation_change_approved, if storage won't apply it  resolve_allocation_change_ticket
     either state saved as "failed..."                      file_storage_failure_ticket
     either state saved as "success", after a failure       resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
-Requests open a ticket when they're submitted, unless a ticketing admin submitted them. They're
-resolved when the storage plugin reports its work done, not on approval (decided 2026-10-07): the
-plugin creates shares and sets quotas in background tasks after approval and records the outcome in
-those two allocation attributes, so resolving on approval could tell the customer "done" before --
-or despite -- a failure. A failure leaves the request's ticket open, and files an admin-only child
-ticket for it, resolved by a later success.
+Requests open a ticket when they're submitted, unless a ticketing admin submitted them. Requests the
+storage plugin provisions are resolved when it reports its work done, not on approval (decided
+2026-10-07): the plugin creates shares and sets quotas in background tasks after approval and
+records the outcome in those two allocation attributes, so resolving on approval could tell the
+customer "done" before -- or despite -- a failure. A failure leaves the request's ticket open, and
+files an admin-only child ticket for it, resolved by a later success. Everything else -- other
+resource types, and Storage change requests that don't change the quota -- is resolved on approval
+(storage_will_provision decides; 2026-10-15).
 
-Approval (allocation_activate, allocation_change_approved) queues nothing, but it is the last moment
-the approving admin's request -- and so their ticketing switch -- is visible. If the switch is off,
-the approval leaves a `ticketing_suppressed` marker on the allocation, holding the request's
-correlation_id; the storage success that follows finds it, deletes it and resolves nothing. A
-failure in between finds it too, leaves it, and files nothing.
+For a request storage provisions, approval queues nothing, but it is the last moment the approving
+admin's request -- and so their ticketing switch -- is visible. If the switch is off, the approval
+leaves a `ticketing_suppressed` marker on the allocation, holding the request's correlation_id; the
+storage success that follows finds it, deletes it and resolves nothing. A failure in between finds
+it too, leaves it, and files nothing. A request resolved on approval needs no marker: the resolve is
+queued inside the admin's request, where enqueue_ticket sees the switch.
 
 Each receiver hands off with ticketing.dispatch.enqueue_ticket, never async_task directly, and
 passes only pks so the task re-queries committed state. Denials, renewals and account upgrades are
@@ -31,7 +36,12 @@ out of scope (see docs/plan.md).
 
 import logging
 
-from coldfront.core.allocation.models import AllocationAttribute, AllocationAttributeChangeRequest
+from coldfront.core.allocation.models import (
+    Allocation,
+    AllocationAttribute,
+    AllocationAttributeChangeRequest,
+    AllocationChangeRequest,
+)
 from coldfront.core.allocation.signals import (
     allocation_activate,
     allocation_change_approved,
@@ -53,7 +63,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from ticketing import toggle
-from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME
+from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME, storage_will_provision
 from ticketing.dispatch import enqueue_ticket
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
@@ -135,14 +145,23 @@ def open_request(task, pk, kwargs):
 
 @receiver(allocation_activate, dispatch_uid="ticketing-allocation-activate")
 def allocation_approved(sender, allocation_pk, **kwargs):
-    if sent_by(sender, AllocationDetailView):
+    if not sent_by(sender, AllocationDetailView):
+        return
+    if storage_will_provision(Allocation.objects.get(pk=allocation_pk)):
         suppress_if_off(allocation_pk, allocation_correlation_id(allocation_pk))
+    else:
+        enqueue_ticket("ticketing.tasks.resolve_allocation_ticket", allocation_pk)
 
 
 @receiver(allocation_change_approved, dispatch_uid="ticketing-change-approved")
 def allocation_change_approved_(sender, allocation_pk, allocation_change_pk, **kwargs):
-    if sent_by(sender, AllocationChangeDetailView):
+    if not sent_by(sender, AllocationChangeDetailView):
+        return
+    change = AllocationChangeRequest.objects.select_related("allocation").get(pk=allocation_change_pk)
+    if storage_will_provision(change.allocation, change):
         suppress_if_off(allocation_pk, change_correlation_id(allocation_change_pk))
+    else:
+        enqueue_ticket("ticketing.tasks.resolve_allocation_change_ticket", allocation_change_pk)
 
 
 def suppress_if_off(allocation_pk, correlation_id):
@@ -166,19 +185,21 @@ def suppress_if_off(allocation_pk, correlation_id):
     logger.info("Ticketing is off for %s; %s won't be resolved", request.user.username, correlation_id)
 
 
+def _markers(allocation_pk, correlation_id):
+    return AllocationAttribute.objects.filter(
+        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
+    )
+
+
 def take_suppression(allocation_pk, correlation_id) -> bool:
     """Delete the request's suppression marker, returning whether there was one."""
-    deleted, _ = AllocationAttribute.objects.filter(
-        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
-    ).delete()
+    deleted, _ = _markers(allocation_pk, correlation_id).delete()
     return bool(deleted)
 
 
 def is_suppressed(allocation_pk, correlation_id) -> bool:
     """Whether the request has a suppression marker, leaving it for the success that uses it up."""
-    return AllocationAttribute.objects.filter(
-        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
-    ).exists()
+    return _markers(allocation_pk, correlation_id).exists()
 
 
 @receiver(post_save, sender=AllocationAttribute, dispatch_uid="ticketing-storage-state")
@@ -199,12 +220,14 @@ def storage_state_saved(sender, instance, **kwargs):
     allocation_pk = instance.allocation_id
     if name == SHARE_STATE_ATTRIBUTE:
         change_pk, correlation_id = None, allocation_correlation_id(allocation_pk)
+        resolve, pk = "ticketing.tasks.resolve_allocation_ticket", allocation_pk
     elif name == QUOTA_STATE_ATTRIBUTE:
         change_pk = applied_quota_change_pk(allocation_pk)
         if change_pk is None:
             logger.info("Quota set on allocation %s with no approved change request for it", allocation_pk)
             return
         correlation_id = change_correlation_id(change_pk)
+        resolve, pk = "ticketing.tasks.resolve_allocation_change_ticket", change_pk
     else:
         return
 
@@ -222,11 +245,7 @@ def storage_state_saved(sender, instance, **kwargs):
         correlation_id=storage_failure_correlation_id(correlation_id), resolved_at__isnull=True
     ).exists():
         enqueue_ticket("ticketing.tasks.resolve_storage_failure_ticket", allocation_pk, change_pk)
-    if change_pk is None:
-        task, pk = "ticketing.tasks.resolve_allocation_ticket", allocation_pk
-    else:
-        task, pk = "ticketing.tasks.resolve_allocation_change_ticket", change_pk
-    enqueue_ticket(task, pk)
+    enqueue_ticket(resolve, pk)
 
 
 def applied_quota_change_pk(allocation_pk):
