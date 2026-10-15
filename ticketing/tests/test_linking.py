@@ -4,7 +4,7 @@ import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.messages import get_messages
 from django.template import Context, Template
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.urls import reverse
 
 from ticketing import linking, tasks
@@ -114,6 +114,25 @@ def test_a_project_offers_todays_user_changes(pi, today):
     assert target.label == "Today's user changes (2026-09-28)"
 
 
+def test_a_project_also_offers_each_allocations_requests_grouped_newest_first(pi, today):
+    older = make_storage_change(pi, resource_name="Research Storage")
+    newer, _ = make_storage_allocation(pi, resource_name="RStore")
+    project = older.allocation.project
+    newer.project = project
+    newer.save()
+
+    targets = linking.link_targets(project)
+
+    assert [(t.group, t.correlation_id) for t in targets] == [
+        ("This project", f"coldfront:project-users:{project.pk}:2026-09-28"),
+        (linking.allocation_label(newer), f"coldfront:allocation:{newer.pk}"),
+        (linking.allocation_label(older.allocation), f"coldfront:allocation:{older.allocation.pk}"),
+        (linking.allocation_label(older.allocation), f"coldfront:allocation-change:{older.pk}"),
+    ]
+    assert targets[1].group.startswith("RStore allocation (Active, ")
+    assert targets[3].subjects == {"allocation_change": older, "allocation": older.allocation}
+
+
 # -- Linking -------------------------------------------------------------------------------------
 
 
@@ -129,6 +148,7 @@ def test_linking_adopts_the_incident(pi, admin, snow):
     assert ticket.number == "INC0000001" and ticket.sys_id == theirs["sys_id"]
     assert ticket.source == FiledTicket.Source.LINKED
     assert ticket.linked_by == admin
+    assert ticket.linked_at is not None
     assert ticket.allocation == allocation
     assert ticket.kind == FiledTicket.Kind.ALLOCATION
 
@@ -291,6 +311,35 @@ def flashed(response):
     return [str(m) for m in get_messages(response.wsgi_request)]
 
 
+@pytest.mark.parametrize("status", ["Denied", "Expired", "Revoked"])
+def test_a_project_hides_allocations_nothing_will_resolve(pi, today, status):
+    allocation, _ = make_storage_allocation(pi)
+    allocation.status = f.AllocationStatusChoiceFactory(name=status)
+    allocation.save()
+
+    targets = linking.link_targets(allocation.project)
+
+    assert [t.group for t in targets] == ["This project"]
+    assert linking.link_targets(allocation)[0].correlation_id == f"coldfront:allocation:{allocation.pk}"
+
+
+def test_an_allocation_can_be_linked_from_its_projects_page(pi, admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs = snow.add()
+    client.force_login(admin)
+
+    response = client.post(
+        link_url("project", allocation.project.pk),
+        {"number": theirs["number"], "target": f"coldfront:allocation:{allocation.pk}"},
+    )
+
+    assert response.url == reverse("project-detail", kwargs={"pk": allocation.project.pk})
+    assert flashed(response) == [
+        f"Linked {theirs['number']} to the allocation request of the {linking.allocation_label(allocation)}."
+    ]
+    assert FiledTicket.objects.get().allocation == allocation
+
+
 def test_posting_links_and_returns_to_the_allocation(pi, admin, client, snow):
     allocation, _ = make_storage_allocation(pi)
     ours = tasks.create_allocation_ticket(allocation.pk)
@@ -396,3 +445,166 @@ def test_the_card_offers_the_form_even_with_no_tickets(pi, admin):
     assert "No ServiceNow tickets yet." in html
     assert f'action="{link_url("allocation", allocation.pk)}"' in html
     assert f'<option value="coldfront:allocation:{allocation.pk}">The allocation request</option>' in html
+
+
+# -- Unlinking -----------------------------------------------------------------------------------
+
+
+def linked(snow, admin, allocation):
+    """A customer's incident linked to `allocation`'s request; returns (its record, the FiledTicket)."""
+    theirs = snow.add()
+    linking.link_ticket(theirs["number"], allocation_target(allocation), admin)
+    return theirs, FiledTicket.objects.get(correlation_id=f"coldfront:allocation:{allocation.pk}")
+
+
+def test_unlinking_clears_the_incidents_correlation_id_and_forgets_it(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+
+    linking.unlink_ticket(filed, admin)
+
+    assert theirs["correlation_id"] == ""
+    assert theirs["work_notes"] == f"Unlinked from ColdFront (coldfront:allocation:{allocation.pk}) by admin01."
+    assert not FiledTicket.objects.exists()
+
+
+def test_after_unlinking_the_request_can_be_linked_again(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    _, filed = linked(snow, admin, allocation)
+    linking.unlink_ticket(filed, admin)
+    other = snow.add()
+
+    linking.link_ticket(other["number"], allocation_target(allocation), admin)
+
+    assert other["correlation_id"] == f"coldfront:allocation:{allocation.pk}"
+
+
+def test_after_unlinking_the_resolve_files_its_own_ticket(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+    linking.unlink_ticket(filed, admin)
+
+    incident = tasks.resolve_allocation_ticket(allocation.pk)
+
+    assert incident.number != theirs["number"]
+    assert theirs["state"] == "1"  # the customer's incident is left for an admin
+    assert snow.by_number(incident.number)["state"] == "6"
+
+
+def test_only_linked_tickets_can_be_unlinked(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    ours = tasks.create_allocation_ticket(allocation.pk)
+
+    with pytest.raises(linking.LinkError, match=f"ColdFront filed {ours.number} itself"):
+        linking.unlink_ticket(FiledTicket.objects.get(), admin)
+
+
+def test_a_ticket_coldfront_resolved_cant_be_unlinked(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    _, filed = linked(snow, admin, allocation)
+    tasks.resolve_allocation_ticket(allocation.pk)
+    filed.refresh_from_db()
+
+    with pytest.raises(linking.LinkError, match="ColdFront has resolved"):
+        linking.unlink_ticket(filed, admin)
+
+
+def test_a_ticket_resolved_in_servicenow_cant_be_unlinked(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+    theirs["state"] = "6"
+
+    with pytest.raises(linking.LinkError, match="already resolved in ServiceNow"):
+        linking.unlink_ticket(filed, admin)
+    assert FiledTicket.objects.exists()
+
+
+def test_a_correlation_id_pointed_elsewhere_is_left_alone(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+    theirs["correlation_id"] = "something:else"
+    snow.updates.clear()
+
+    linking.unlink_ticket(filed, admin)
+
+    assert theirs["correlation_id"] == "something:else"
+    assert snow.updates == []
+    assert not FiledTicket.objects.exists()
+
+
+def unlink_url(filed):
+    return reverse("ticketing-unlink", kwargs={"pk": filed.pk})
+
+
+def test_posting_unlinks_and_returns_to_the_page(pi, admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+    page = reverse("project-detail", kwargs={"pk": allocation.project.pk})
+    client.force_login(admin)
+
+    response = client.post(unlink_url(filed), {"next": page})
+
+    assert response.url == page
+    assert flashed(response)[0].startswith(f"Unlinked {theirs['number']}.")
+    assert not FiledTicket.objects.exists()
+
+
+def test_without_a_page_to_return_to_it_goes_to_the_allocation(pi, admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    _, filed = linked(snow, admin, allocation)
+    client.force_login(admin)
+
+    response = client.post(unlink_url(filed), {"next": "https://elsewhere.example/"})
+
+    assert response.url == reverse("allocation-detail", kwargs={"pk": allocation.pk})
+
+
+def test_an_unlink_refusal_is_shown(pi, admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    theirs, filed = linked(snow, admin, allocation)
+    theirs["state"] = "7"
+    client.force_login(admin)
+
+    response = client.post(unlink_url(filed))
+
+    assert flashed(response) == [
+        f"Not unlinked: {theirs['number']} is already resolved in ServiceNow, so it can't be unlinked"
+    ]
+
+
+def test_unlinking_is_ticketing_admins_only(pi, admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    _, filed = linked(snow, admin, allocation)
+    client.force_login(pi)
+
+    assert client.post(unlink_url(filed)).status_code == 403
+    assert FiledTicket.objects.exists()
+
+
+def render_allocation_card(user, allocation):
+    request = RequestFactory().get(f"/allocation/{allocation.pk}/")
+    request.user = user
+    return Template("{% include 'ticketing/filed_tickets.html' with subject=allocation %}").render(
+        Context({"request": request, "allocation": allocation})
+    )
+
+
+@override_settings(SERVICENOW_URL="https://servicenow.invalid")
+def test_the_card_offers_unlink_until_coldfront_resolves_it(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    _, filed = linked(snow, admin, allocation)
+
+    assert f'action="{unlink_url(filed)}"' in render_allocation_card(admin, allocation)
+    assert f'name="next" value="/allocation/{allocation.pk}/"' in render_allocation_card(admin, allocation)
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    assert f'action="{unlink_url(filed)}"' not in render_allocation_card(admin, allocation)
+
+
+@override_settings(SERVICENOW_URL="https://servicenow.invalid")
+def test_the_card_offers_no_unlink_for_coldfronts_own_tickets(pi, admin, snow):
+    allocation, _ = make_storage_allocation(pi)
+    tasks.create_allocation_ticket(allocation.pk)
+
+    assert 'name="next"' not in render_allocation_card(admin, allocation)  # the unlink form's field

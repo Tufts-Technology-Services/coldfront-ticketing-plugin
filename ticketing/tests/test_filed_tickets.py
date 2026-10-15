@@ -1,3 +1,4 @@
+import datetime
 import logging
 
 import pytest
@@ -5,6 +6,7 @@ from coldfront.core.test_helpers import factories as f
 from django.template import Context, Template
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
 from ticketing import tasks
 from ticketing.client import Incident
@@ -243,16 +245,106 @@ def test_others_see_nothing(pi):
     assert render_card(pi, allocation).strip() == ""
 
 
+PROJECT_CARD = Template("{% include 'ticketing/filed_tickets.html' with subject=project %}")
+
+
+def render_project_card(user, project):
+    request = RequestFactory().get("/")
+    request.user = user
+    return PROJECT_CARD.render(Context({"request": request, "project": project}))
+
+
 @override_settings(SERVICENOW_URL=SNOW)
-def test_linked_tickets_are_marked(pi, admin):
+def test_each_ticket_names_and_links_what_its_for(pi, admin):
+    allocation, _ = make_storage_allocation(pi, resource_name="RStore")
+    file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+
+    html = render_card(admin, allocation)
+
+    assert f'<a href="/allocation/{allocation.pk}/">RStore allocation (Active, ' in html
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_a_project_card_tells_its_allocations_apart(pi, admin):
+    first, _ = make_storage_allocation(pi, resource_name="Research Storage")
+    second, _ = make_storage_allocation(pi, resource_name="RStore")
+    second.project = first.project
+    second.save()
+    file(f"coldfront:allocation:{first.pk}", allocation=first)
+    FiledTicket.objects.create(
+        correlation_id=f"coldfront:allocation:{second.pk}",
+        kind=FiledTicket.Kind.ALLOCATION,
+        number="INC0000010",
+        sys_id="def456",
+        allocation=second,
+    )
+
+    html = render_project_card(admin, first.project)
+
+    assert "Research Storage allocation (Active, " in html
+    assert "RStore allocation (Active, " in html
+    assert '<optgroup label="RStore allocation (Active, ' in html  # and both can be linked from here
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_a_storage_failure_shows_the_ticket_its_a_child_of(pi, admin):
+    change = make_storage_change(pi)
+    cid = f"coldfront:allocation-change:{change.pk}"
+    file(cid, FiledTicket.Kind.ALLOCATION_CHANGE, allocation_change=change, allocation=change.allocation)
+    FiledTicket.objects.create(
+        correlation_id=f"{cid}:storage-failed",
+        kind=FiledTicket.Kind.STORAGE_FAILURE,
+        number="INC0000010",
+        sys_id="def456",
+        allocation_change=change,
+        allocation=change.allocation,
+    )
+
+    html = render_card(admin, change.allocation)
+
+    assert 'child of <a href="' in html and ">INC0000009</a></small>" in html
+    assert f'<a href="/allocation/change-request/{change.pk}/">Change request {change.pk} (' in html
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_a_storage_failure_without_a_request_ticket_says_so(pi, admin):
+    allocation, _ = make_storage_allocation(pi)
+    file(
+        f"coldfront:allocation:{allocation.pk}:storage-failed", FiledTicket.Kind.STORAGE_FAILURE, allocation=allocation
+    )
+
+    assert "no request ticket to be a child of" in render_card(admin, allocation)
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_a_project_user_notice_shows_its_day(pi, admin):
+    project = f.ProjectFactory(pi=pi, title="Genomics Lab")
+    file(f"coldfront:project-users:{project.pk}:2026-10-10", FiledTicket.Kind.PROJECT_USERS, project=project)
+
+    assert "Genomics Lab, 2026-10-10" in render_project_card(admin, project)
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_linked_tickets_are_marked_with_who_and_when(pi, admin):
+    allocation, _ = make_storage_allocation(pi)
+    ticket = file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    ticket.source, ticket.linked_by = FiledTicket.Source.LINKED, admin
+    ticket.linked_at = timezone.make_aware(datetime.datetime(2026, 10, 14, 9, 30))
+    ticket.save()
+
+    html = render_card(admin, allocation)
+
+    assert 'title="Filed in ServiceNow; linked by admin01 on Oct. 14, 2026, 9:30 a.m.">linked</span>' in html
+
+
+@override_settings(SERVICENOW_URL=SNOW)
+def test_a_link_with_no_time_recorded_shows_without_one(pi, admin):
     allocation, _ = make_storage_allocation(pi)
     ticket = file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
     ticket.source, ticket.linked_by = FiledTicket.Source.LINKED, admin
     ticket.save()
 
-    html = render_card(admin, allocation)
-
-    assert 'title="Filed in ServiceNow; linked by admin01">linked</span>' in html
+    assert 'title="Filed in ServiceNow; linked by admin01">linked</span>' in render_card(admin, allocation)
 
 
 @override_settings(SERVICENOW_URL=SNOW)

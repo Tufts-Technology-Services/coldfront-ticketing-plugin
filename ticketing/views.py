@@ -13,7 +13,8 @@ from django.views import View
 
 from ticketing import toggle
 from ticketing.client import ServiceNowError
-from ticketing.linking import LinkError, link_targets, link_ticket
+from ticketing.linking import PROJECT_GROUP, LinkError, link_targets, link_ticket, unlink_ticket
+from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
 
 logger = logging.getLogger(__name__)
@@ -84,8 +85,50 @@ class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
             messages.error(request, "Not linked: ServiceNow couldn't be reached or refused the change. Try again.")
             return back
 
-        message = f"Linked {linked.incident.number} to {target.label.lower()}."
+        # From a project page, say which allocation the request belongs to.
+        of = f" of the {target.group}" if target.group and target.group != PROJECT_GROUP else ""
+        message = f"Linked {linked.incident.number} to {target.label.lower()}{of}."
         if linked.duplicate:
             message += f" ColdFront's {linked.duplicate.number} was closed as a duplicate of it."
         messages.success(request, message)
         return back
+
+
+class UnlinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Undo a link from the ticket card, before the ticket is resolved (ticketing.linking.unlink_ticket).
+
+    Returns to the page the form was on (`next`), else the ticket's allocation or project page.
+    """
+
+    def test_func(self):
+        return is_ticketing_admin(self.request.user)
+
+    def post(self, request, pk):
+        filed = get_object_or_404(FiledTicket, pk=pk)
+        back = redirect(self._back(request, filed))
+        number = filed.number
+        try:
+            unlink_ticket(filed, request.user)
+        except LinkError as e:
+            messages.error(request, f"Not unlinked: {e}")
+        except (ServiceNowError, requests.RequestException):
+            logger.exception("Unlinking %s from %s failed", number, filed.correlation_id)
+            messages.error(request, "Not unlinked: ServiceNow couldn't be reached or refused the change. Try again.")
+        else:
+            messages.success(
+                request,
+                f"Unlinked {number}. ColdFront no longer treats it as this request's ticket; link another, "
+                "or ColdFront files its own when the request is resolved.",
+            )
+        return back
+
+    @staticmethod
+    def _back(request, filed):
+        back = request.POST.get("next", "")
+        if back and url_has_allowed_host_and_scheme(back, {request.get_host()}, request.is_secure()):
+            return back
+        if filed.allocation_id:
+            return reverse("allocation-detail", kwargs={"pk": filed.allocation_id})
+        if filed.project_id:
+            return reverse("project-detail", kwargs={"pk": filed.project_id})
+        return reverse("home")

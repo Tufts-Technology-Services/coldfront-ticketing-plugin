@@ -27,18 +27,38 @@ this plugin:
             </tr>
           </thead>
           <tbody>
-            {% for ticket in filed_tickets %}
+            {% for row in filed_tickets %}
+              {% with ticket=row.ticket %}
               <tr>
                 <td>
                   <a href="{{ ticket.url }}" target="_blank" rel="noopener noreferrer">{{ ticket.number }}</a>
                   {% if ticket.source == "linked" %}
-                    <span class="badge bg-info text-dark" title="Filed in ServiceNow{% if ticket.linked_by %}; linked by {{ ticket.linked_by.username }}{% endif %}">linked</span>
+                    <span class="badge bg-info text-dark" title="Filed in ServiceNow{% if ticket.linked_by %}; linked by {{ ticket.linked_by.username }}{% endif %}{% if ticket.linked_at %} on {{ ticket.linked_at }}{% endif %}">linked</span>
+                    {% if not ticket.resolved_at %}
+                      <form method="post" action="{% url 'ticketing-unlink' ticket.pk %}" class="d-inline"
+                            onsubmit="return confirm('Unlink {{ ticket.number }}? ColdFront will stop treating it as this request\'s ticket.');">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="btn btn-link btn-sm p-0 align-baseline"
+                                title="Undo the link. Possible until the ticket is resolved.">unlink</button>
+                      </form>
+                    {% endif %}
                   {% endif %}
                 </td>
-                <td>{{ ticket.get_kind_display }} <small class="text-muted">{{ ticket.correlation_id }}</small></td>
+                <td>
+                  {{ ticket.get_kind_display }}:
+                  {% if row.about_url %}<a href="{{ row.about_url }}">{{ row.about }}</a>{% else %}{{ row.about }}{% endif %}
+                  {% if row.parent %}
+                    <br><small>child of <a href="{{ row.parent.url }}" target="_blank" rel="noopener noreferrer">{{ row.parent.number }}</a></small>
+                  {% elif ticket.kind == "storage-failure" %}
+                    <br><small class="text-muted">no request ticket to be a child of</small>
+                  {% endif %}
+                  <br><small class="text-muted">{{ ticket.correlation_id }}</small>
+                </td>
                 <td>{{ ticket.created }}</td>
                 <td>{{ ticket.resolved_at|default:"-" }}</td>
               </tr>
+              {% endwith %}
             {% endfor %}
           </tbody>
         </table>
@@ -57,8 +77,13 @@ this plugin:
       <div class="col-auto">
         <label for="ticketing-link-target" class="form-label">for</label>
         <select id="ticketing-link-target" name="target" class="form-select">
-          {% for target in link_form.targets %}
-            <option value="{{ target.correlation_id }}">{{ target.label }}</option>
+          {% regroup link_form.targets by group as groups %}
+          {% for group in groups %}
+            {% if group.grouper %}<optgroup label="{{ group.grouper }}">{% endif %}
+            {% for target in group.list %}
+              <option value="{{ target.correlation_id }}">{{ target.label }}</option>
+            {% endfor %}
+            {% if group.grouper %}</optgroup>{% endif %}
           {% endfor %}
         </select>
       </div>

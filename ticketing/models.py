@@ -54,6 +54,8 @@ class FiledTicket(TimeStampedModel):
     linked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
     )
+    # When it was linked. Not `created`: linking can take over the row of a ticket ColdFront filed.
+    linked_at = models.DateTimeField(null=True, blank=True)
     table = models.CharField(max_length=40, default="incident")
     number = models.CharField(max_length=40)
     sys_id = models.CharField(max_length=32)

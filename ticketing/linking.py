@@ -7,10 +7,12 @@ incident that request's correlation_id and records it as a FiledTicket, so the t
 their own: the create task finds it and files nothing, and the resolve task resolves it with the
 customer message, leaving its caller and watch list alone.
 
-If ColdFront already opened an incident for the request (the admin submitted it on the customer's
-behalf, so allocation_new filed one), that one is closed as a duplicate of the linked incident, the
+If ColdFront already opened an incident for the request (the customer also submitted it in
+ColdFront, so allocation_new filed one), that one is closed as a duplicate of the linked incident, the
 way Tufts staff close duplicates: u_duplicate_of, state Closed, close notes "Duplicate ticket", no
 close code. Its correlation_id is cleared first, so two incidents never share one.
+
+A link can be undone (unlink_ticket) until the ticket is resolved.
 
 Runs in the admin's request rather than a task, so they see at once whether it worked. It is an
 explicit act, so the admin ticketing switch doesn't apply.
@@ -39,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 INCIDENT_NUMBER = re.compile(r"^INC\d+$")
 DUPLICATE_CLOSE_NOTES = "Duplicate ticket"
+# The link form's group for a project's own targets (today's user changes).
+PROJECT_GROUP = "This project"
+# Allocations a project page's link form leaves out: nothing will be resolved for them. Their own
+# allocation pages still offer them.
+HIDDEN_FROM_PROJECT = ("Denied", "Expired", "Revoked")
 
 
 class LinkError(Exception):
@@ -53,6 +60,7 @@ class LinkTarget:
     label: str
     kind: str
     subjects: dict = field(compare=False)
+    group: str = field(default="", compare=False)  # an <optgroup> in the form; "" for none
 
 
 @dataclass(frozen=True)
@@ -61,41 +69,66 @@ class Linked:
     duplicate: Incident | None  # ColdFront's own incident, closed as a duplicate
 
 
+def allocation_label(allocation, resource=None) -> str:
+    """How an allocation is named on the ticket card: resource, status and when it was requested."""
+    resource = resource or allocation.get_parent_resource
+    name = resource.name if resource else f"Allocation {allocation.pk}"
+    return f"{name} allocation ({allocation.status.name}, {allocation.created:%Y-%m-%d})"
+
+
+def change_label(change) -> str:
+    """How a change request is named on the ticket card."""
+    return f"Change request {change.pk} ({change.status.name}, {change.created:%Y-%m-%d})"
+
+
 def link_targets(subject) -> list[LinkTarget]:
     """What an incident can be linked to from `subject`'s page, most likely first.
 
     An allocation: its request, then its change requests, newest first. A project: today's user
-    changes, so the change an admin is about to make resolves the linked incident.
+    changes, so the change an admin is about to make resolves the linked incident; then each of its
+    allocations' request and change requests, newest allocation first, grouped by allocation, less
+    allocations with a status in HIDDEN_FROM_PROJECT.
     """
     if isinstance(subject, Allocation):
-        targets = [
-            LinkTarget(
-                allocation_correlation_id(subject.pk),
-                "The allocation request",
-                FiledTicket.Kind.ALLOCATION,
-                {"allocation": subject},
-            )
-        ]
-        for change in subject.allocationchangerequest_set.select_related("status").order_by("-created"):
-            targets.append(
-                LinkTarget(
-                    change_correlation_id(change.pk),
-                    f"Change request {change.pk} ({change.status.name}, {change.created:%Y-%m-%d})",
-                    FiledTicket.Kind.ALLOCATION_CHANGE,
-                    {"allocation_change": change, "allocation": subject},
-                )
-            )
-        return targets
+        return _allocation_targets(subject)
     if isinstance(subject, Project):
-        return [
+        targets = [
             LinkTarget(
                 project_users_correlation_id(subject.pk),
                 f"Today's user changes ({timezone.localdate():%Y-%m-%d})",
                 FiledTicket.Kind.PROJECT_USERS,
                 {"project": subject},
+                group=PROJECT_GROUP,
             )
         ]
+        allocations = subject.allocation_set.exclude(status__name__in=HIDDEN_FROM_PROJECT)
+        for allocation in allocations.select_related("status").order_by("-created", "-pk"):
+            targets += _allocation_targets(allocation, group=allocation_label(allocation))
+        return targets
     raise TypeError(f"Nothing to link a ticket to on a {type(subject).__name__}")
+
+
+def _allocation_targets(allocation, group="") -> list[LinkTarget]:
+    targets = [
+        LinkTarget(
+            allocation_correlation_id(allocation.pk),
+            "The allocation request",
+            FiledTicket.Kind.ALLOCATION,
+            {"allocation": allocation},
+            group=group,
+        )
+    ]
+    for change in allocation.allocationchangerequest_set.select_related("status").order_by("-created", "-pk"):
+        targets.append(
+            LinkTarget(
+                change_correlation_id(change.pk),
+                change_label(change),
+                FiledTicket.Kind.ALLOCATION_CHANGE,
+                {"allocation_change": change, "allocation": allocation},
+                group=group,
+            )
+        )
+    return targets
 
 
 def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
@@ -147,9 +180,40 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
             "sys_id": incident.sys_id,
             "source": FiledTicket.Source.LINKED,
             "linked_by": linked_by,
+            "linked_at": timezone.now(),
             "resolved_at": None,
             **target.subjects,
         },
     )
     logger.info("%s linked %s to %s", linked_by.username, number, target.correlation_id)
     return Linked(incident=incident, duplicate=duplicate)
+
+
+def unlink_ticket(filed: FiledTicket, unlinked_by) -> None:
+    """Undo a link, before the ticket is resolved. Raises LinkError if it can't be undone.
+
+    Clears the incident's correlation_id, with an internal work note saying who unlinked it, and
+    deletes the FiledTicket, so ColdFront no longer treats the incident as the request's: the request
+    can be linked again, and with no link its resolve files a ticket already resolved. If linking
+    closed ColdFront's own incident as a duplicate, that one stays closed.
+    """
+    if filed.source != FiledTicket.Source.LINKED:
+        raise LinkError(f"ColdFront filed {filed.number} itself; only linked tickets can be unlinked")
+    if filed.resolved_at:
+        raise LinkError(f"ColdFront has resolved {filed.number}, so it can't be unlinked")
+    client = client_from_settings()
+    incident = client.find_incident_by_number(filed.number)
+    if incident is not None:
+        if incident.state in (STATE_RESOLVED, STATE_CLOSED):
+            raise LinkError(f"{filed.number} is already resolved in ServiceNow, so it can't be unlinked")
+        # Leave the correlation_id alone if someone has since pointed it elsewhere.
+        if incident.correlation_id == filed.correlation_id:
+            client.update_incident(
+                incident.sys_id,
+                {
+                    "correlation_id": "",
+                    "work_notes": f"Unlinked from ColdFront ({filed.correlation_id}) by {unlinked_by.username}.",
+                },
+            )
+    filed.delete()
+    logger.info("%s unlinked %s from %s", unlinked_by.username, filed.number, filed.correlation_id)

@@ -167,10 +167,19 @@ Ticketing admins can see them in two places:
   ```
 
   The card also has a **"Link a ServiceNow ticket"** form, for requests filed in ServiceNow directly
-  (by email or the portal). Give it the incident number and what it's for (the allocation request, a
-  change request, or today's project user changes): ColdFront then resolves that incident instead of
+  (by email or the portal). Give it the incident number and what it's for: on an allocation's page,
+  its request or a change request; on a project's page, today's project user changes or any of its
+  allocations' requests, grouped by allocation (Denied, Expired and Revoked allocations are left out
+  there; their own pages still offer them). ColdFront then resolves that incident instead of
   filing its own, and closes any incident it had already opened for the request as a duplicate.
   The card shows for ticketing admins even with no tickets, for the form.
+
+  Each row names what the ticket is for, such as "RStore allocation (New, 2026-10-14)", linked to
+  its page, so two requests on one project are easy to tell apart. A storage-failure ticket also
+  shows the request ticket it's a child of. Hovering over a linked ticket's "linked" badge shows
+  who linked it and when. Until it's resolved, a linked ticket has an **unlink** control beside the
+  badge, for a ticket linked to the wrong request: ColdFront clears the incident's correlation_id
+  (adding an internal work note) and forgets the link, so the request can be linked again.
 
   Requests submitted by ticketing admins open no ticket, since one would email
   the PI and Approvers before the customer's ServiceNow ticket could be linked. They're still
