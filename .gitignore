@@ -22,3 +22,6 @@ htmlcov/
 
 CLAUDE.md
 .claude/*
+
+# Internal design notes, kept locally only
+docs/plan.md

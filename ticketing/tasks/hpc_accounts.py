@@ -1,6 +1,6 @@
 """HPC account tickets: opened when the user has no UID yet, resolved when the account is created.
 
-Not triggered yet (see "HPC account creation ticket" in docs/plan.md).
+Not triggered yet (see "Not yet wired up" in docs/design.md).
 """
 
 from django.contrib.auth import get_user_model

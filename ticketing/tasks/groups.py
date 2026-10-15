@@ -1,6 +1,6 @@
 """Group membership tickets: a user added to or removed from a project group.
 
-Unused: the trigger is to be a batch (see "Group membership tickets" in docs/plan.md). These record
+Unused: the trigger is to be a batch (see "Not yet wired up" in docs/design.md). These record
 nothing locally.
 """
 

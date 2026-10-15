@@ -31,7 +31,7 @@ queued inside the admin's request, where enqueue_ticket sees the switch.
 
 Each receiver hands off with ticketing.dispatch.enqueue_ticket, never async_task directly, and
 passes only pks so the task re-queries committed state. Denials, renewals and account upgrades are
-out of scope (see docs/plan.md).
+out of scope (see "Out of scope" in docs/design.md).
 """
 
 import logging
@@ -84,7 +84,7 @@ SUPPRESSED_ATTRIBUTE = "ticketing_suppressed"
 def requestor(kwargs):
     """Who submitted the request: `requestor_pk` if core sends it, else the logged-in user.
 
-    Core doesn't send requestor_pk yet (docs/plan.md, A1). These signals are sent from inside the
+    Core doesn't send requestor_pk yet (see "Companion ColdFront change" in docs/design.md). These signals are sent from inside the
     view, so the request HistoryRequestMiddleware stashed is the submitter's. Without either the
     task falls back to the PI.
     """

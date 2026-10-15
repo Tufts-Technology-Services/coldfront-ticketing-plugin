@@ -1,7 +1,7 @@
 """ServiceNowIncident dataclass and its conversion to a ServiceNow incident payload.
 
-Adapted from rt-ticket-utils, where the dataclass is `Ticket`; the verbatim original is in
-docs/reference/ and docs/plan.md explains what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
+Adapted from rt-ticket-utils, where the dataclass is `Ticket`: reworked from an emailed field block
+into the Table API payload (see "Why the REST API, not email intake" in docs/design.md). Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
 """
 
 import logging

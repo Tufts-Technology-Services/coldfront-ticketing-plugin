@@ -112,7 +112,7 @@ def storage_will_provision(allocation, change=None) -> bool:
 
     If it does, the request is resolved when the plugin records success (ticketing.signals);
     otherwise it is resolved on approval. Copies the plugin's own conditions (storage/signals.py,
-    read at 528f8e5a; see "Storage plugin issues" in docs/plan.md): an allocation whose first
+    see "What the storage plugin doesn't provision" in docs/design.md): an allocation whose first
     resource is of type Storage gets a share when it becomes Active, and an approved change request
     on one is applied only if it changes the quota attribute. Keep this in step with the plugin: if
     it says no when the plugin does act, the customer hears "done" before the storage exists.
