@@ -10,7 +10,7 @@ approved work done.
 ## Status
 
 **Not yet deployed.** The ServiceNow client (`client.py`), the incident payload (`tickets.py`), the
-tasks (`tasks.py`) and the signal receivers (`signals.py`) are written and tested, and the
+tasks (`tasks/`) and the signal receivers (`signals.py`) are written and tested, and the
 allocation lifecycles have been trial-run on a development instance. Requests open a ticket when
 submitted (unless a ticketing admin submitted them); the storage plugin's success resolves it. See
 `docs/plan.md` for the status of each piece and what is still open.
@@ -206,13 +206,19 @@ ticketing/
   toggle.py     the admin switch, kept in the session
   permissions.py   is_ticketing_admin: superusers and holders of ticketing.manage_ticketing
   views.py, urls.py, context_processors.py   the menu-bar control (htmx)
-  tasks.py      re-query by pk, build the incident payload, create or resolve via the API
+  slots.py      TicketSlot: the one ticket kept per request or event; correlation ids
+  tasks/        the tasks, re-exported as ticketing.tasks.<name>, which is how they're queued:
+    allocations.py, storage_failures.py, project_users.py, hpc_accounts.py, groups.py
+                one module per kind of ticket
+    filing.py   open, resolve or file, and record the incident that fills a slot
+    people.py   who is on a ticket, and who approved a request
   models.py     FiledTicket: each ticket filed, what it's about, and its ServiceNow link
   admin.py      FiledTicket, read-only
   linking.py    adopt a ticket filed in ServiceNow (the card's link form, LinkTicketView)
   templatetags/ticketing_tags.py   filed_tickets_for, link_form_for, for the ticket card
   client.py     ServiceNow Table API client (requests)
-  tickets.py    Ticket dataclass + incident payload builder (adapted from rt-ticket-utils)
+  tickets.py    ServiceNowIncident (the incident payload) and ServiceNow's choice values
+                (adapted from rt-ticket-utils)
   templates/ticketing/   Django templates for incident description and resolution text
   tests/        settings.py layers on coldfront's real settings; conftest.py fixtures
 docs/

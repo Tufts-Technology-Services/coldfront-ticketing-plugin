@@ -1,6 +1,7 @@
 import pytest
 from coldfront.core.test_helpers import factories as f
 
+from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
@@ -19,7 +20,7 @@ pytestmark = pytest.mark.django_db
 @pytest.fixture
 def snow(monkeypatch):
     client = FakeServiceNow()
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
     return client
 
 
@@ -110,7 +111,7 @@ def test_an_approver_servicenow_doesnt_know_falls_back_to_the_service_account(
     pi, requestor, admin, in_request, monkeypatch, caplog
 ):
     snow = NoSuchUser("admin01")
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: snow)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: snow)
     allocation = activated(in_request, requestor, admin, pi)
 
     tasks.file_storage_failure_ticket(allocation.pk)

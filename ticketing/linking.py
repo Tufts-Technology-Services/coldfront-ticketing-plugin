@@ -26,17 +26,13 @@ from coldfront.core.allocation.models import Allocation
 from coldfront.core.project.models import Project
 from django.utils import timezone
 
+from ticketing import client as servicenow
 from ticketing.allocation_updates import resource_label
-from ticketing.client import IncidentRef, client_from_settings
+from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
-from ticketing.tasks import (
-    DONE_STATES,
-    STATE_CLOSED,
-    AllocationTicketSlot,
-    TicketSlot,
-    default_assignment,
-    project_users_slot,
-)
+from ticketing.slots import AllocationTicketSlot, TicketSlot, project_users_slot
+from ticketing.tasks.filing import default_assignment
+from ticketing.tickets import DONE_STATES, STATE_CLOSED
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +132,7 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
     number = number.strip().upper()
     if not INCIDENT_NUMBER.match(number):
         raise LinkError(f"{number!r} isn't an incident number (INC followed by digits)")
-    client = client_from_settings()
+    client = servicenow.client_from_settings()
 
     incident = client.find_incident_by_number(number)
     if incident is None:
@@ -155,7 +151,7 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
                 f"by hand, as a duplicate of {ours.number}."
             )
         # Clear its correlation_id first: if setting ours then fails, nothing shares one, and
-        # linking again just sets it. Closed, like resolved, means assigned (see _resolve_or_file).
+        # linking again just sets it. Closed, like resolved, means assigned (see tasks.filing.resolve_or_file).
         client.update_incident(
             ours.sys_id,
             {
@@ -201,7 +197,7 @@ def unlink_ticket(filed: FiledTicket, unlinked_by) -> None:
         raise LinkError(f"ColdFront filed {filed.number} itself; only linked tickets can be unlinked")
     if filed.resolved_at:
         raise LinkError(f"ColdFront has resolved {filed.number}, so it can't be unlinked")
-    client = client_from_settings()
+    client = servicenow.client_from_settings()
     incident = client.find_incident_by_number(filed.number)
     if incident is not None:
         if incident.state in DONE_STATES:

@@ -17,6 +17,16 @@ LONG_TEXT_MAX_LENGTH = 4000
 LONG_TEXT_FIELDS = ("description", "close_notes", "comments", "work_notes")
 TRUNCATION_MARKER = "\n[truncated]"
 DEFAULT_BUSINESS_SERVICE = "High Performance Computing (HPC)"
+# Incident choice values, checked against the instance's field metadata (/api/now/ui/meta/incident).
+# An invalid value is dropped without an error, so don't change these without re-checking.
+STATE_ACTIVE = "2"
+STATE_RESOLVED = "6"
+STATE_CLOSED = "7"
+DONE_STATES = (STATE_RESOLVED, STATE_CLOSED)  # nothing more to send
+CLOSE_CODE_SOLVED_REMOTELY = "Solved Remotely (Permanently)"
+CONTACT_TYPE_SELF_SERVICE = "self-service"
+CONTACT_TYPE_EMAIL = "email"
+CONTACT_TYPE_MONITORING = "monitoring"
 # u_action choice values: a new thing set up, or a change to an existing one.
 U_ACTION_ACTIVATE = "Activate/Setup/Install"
 U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"

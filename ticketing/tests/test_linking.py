@@ -6,7 +6,9 @@ from django.contrib.messages import get_messages
 from django.template import Context, Template
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
+from ticketing import client as servicenow
 from ticketing import linking, tasks
 from ticketing.client import IncidentRef, ServiceNowError
 from ticketing.models import FiledTicket
@@ -71,15 +73,13 @@ class FakeServiceNow:
 @pytest.fixture
 def snow(monkeypatch):
     client = FakeServiceNow()
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
-    monkeypatch.setattr(linking, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
     return client
 
 
 @pytest.fixture
 def today(monkeypatch):
-    monkeypatch.setattr(tasks.timezone, "localdate", lambda: datetime.date(2026, 9, 28))
-    monkeypatch.setattr(linking.timezone, "localdate", lambda: datetime.date(2026, 9, 28))
+    monkeypatch.setattr(timezone, "localdate", lambda: datetime.date(2026, 9, 28))
 
 
 def allocation_target(allocation):

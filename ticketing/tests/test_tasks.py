@@ -4,8 +4,10 @@ import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
+from django.utils import timezone
 
-from ticketing import tasks
+from ticketing import client as servicenow
+from ticketing import slots, tasks
 from ticketing.client import IncidentRef
 from ticketing.tests.test_allocation_updates import FakeServiceNow, make_storage_allocation, make_storage_change
 
@@ -34,14 +36,14 @@ class FakeClient:
 @pytest.fixture
 def fake_client(monkeypatch):
     client = FakeClient()
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
     return client
 
 
 @pytest.fixture
 def use_client(monkeypatch):
     def install(client):
-        monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+        monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
         return client
 
     return install
@@ -155,7 +157,7 @@ def test_unknown_user_raises_before_calling_servicenow(fake_client, task):
 def today(monkeypatch):
     """Pin the date the group and project-users tasks put in their correlation_id."""
     day = {"today": datetime.date(2026, 9, 28)}
-    monkeypatch.setattr(tasks.timezone, "localdate", lambda: day["today"])
+    monkeypatch.setattr(timezone, "localdate", lambda: day["today"])
     return day
 
 
@@ -266,7 +268,7 @@ def test_group_removal_files_nothing_for_a_superuser(django_user_model, fake_cli
 def test_group_membership_rerun_returns_the_existing_incident(requestor, monkeypatch):
     existing = IncidentRef(sys_id="i-0", number="INC0000000")
     client = FakeClient(existing=existing)
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
 
     assert add_to_group() == existing
     assert client.looked_up == ["coldfront:group-add:lab_smith:jdoe01:2026-09-28"]
@@ -275,7 +277,7 @@ def test_group_membership_rerun_returns_the_existing_incident(requestor, monkeyp
 
 def test_group_membership_on_a_later_day_files_a_new_incident(requestor, today, monkeypatch):
     client = FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000"))
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
     add_to_group()
 
     today["today"] = datetime.date(2026, 10, 5)
@@ -372,7 +374,7 @@ def test_a_change_on_a_later_day_files_a_new_notice(project, today, fake_client)
 def test_an_allocation_ticket_slot_knows_its_allocation_request(pi):
     allocation, _ = make_storage_allocation(pi)
 
-    ticket = tasks.AllocationTicketSlot.load(allocation.pk)
+    ticket = slots.AllocationTicketSlot.load(allocation.pk)
 
     assert ticket.correlation_id == f"coldfront:allocation:{allocation.pk}"
     assert ticket.kind == "allocation"
@@ -385,9 +387,9 @@ def test_an_allocation_ticket_slot_knows_its_allocation_request(pi):
 def test_an_allocation_ticket_slot_loads_the_change_request_when_given_one(pi):
     change = make_storage_change(pi)
 
-    ticket = tasks.AllocationTicketSlot.load(change.allocation.pk, change.pk)
+    ticket = slots.AllocationTicketSlot.load(change.allocation.pk, change.pk)
 
-    assert ticket == tasks.AllocationTicketSlot.of_change(change)
+    assert ticket == slots.AllocationTicketSlot.of_change(change)
     assert ticket.correlation_id == f"coldfront:allocation-change:{change.pk}"
     assert ticket.subjects == {"allocation_change": change, "allocation": change.allocation}
     assert (ticket.request, ticket.allocation) == (change, change.allocation)
@@ -398,7 +400,7 @@ def test_an_allocation_ticket_slot_loads_the_change_request_when_given_one(pi):
 def test_a_storage_failure_slot_is_about_the_same_request(pi):
     change = make_storage_change(pi)
 
-    failure = tasks.AllocationTicketSlot.of_change(change).storage_failure()
+    failure = slots.AllocationTicketSlot.of_change(change).storage_failure()
 
     assert failure.correlation_id == f"coldfront:allocation-change:{change.pk}:storage-failed"
     assert failure.kind == "storage-failure"

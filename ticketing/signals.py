@@ -67,7 +67,7 @@ from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME, storage_will_prov
 from ticketing.dispatch import enqueue_ticket
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
-from ticketing.tasks import allocation_correlation_id, change_correlation_id, storage_failure_correlation_id
+from ticketing.slots import allocation_correlation_id, change_correlation_id, storage_failure_correlation_id
 
 logger = logging.getLogger(__name__)
 

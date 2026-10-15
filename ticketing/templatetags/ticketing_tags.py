@@ -6,7 +6,7 @@ from django.urls import reverse
 from ticketing.linking import allocation_label, change_label, link_targets
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
-from ticketing.tasks import STORAGE_FAILURE_SUFFIX
+from ticketing.slots import STORAGE_FAILURE_SUFFIX
 
 register = template.Library()
 

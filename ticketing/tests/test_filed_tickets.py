@@ -8,6 +8,7 @@ from django.test import RequestFactory, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
@@ -33,7 +34,7 @@ class CountingServiceNow(FakeServiceNow):
 @pytest.fixture
 def snow(monkeypatch):
     client = CountingServiceNow()
-    monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+    monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
     return client
 
 

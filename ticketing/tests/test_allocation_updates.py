@@ -5,6 +5,7 @@ from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 
+from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.allocation_updates import (
     UnsupportedUpdate,
@@ -16,6 +17,7 @@ from ticketing.allocation_updates import (
     storage_will_provision,
 )
 from ticketing.client import IncidentRef, UnknownReference
+from ticketing.tasks import people
 
 pytestmark = pytest.mark.django_db
 
@@ -83,7 +85,7 @@ class FakeClient:
 @pytest.fixture
 def use_client(monkeypatch):
     def install(client):
-        monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+        monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
         return client
 
     return install
@@ -352,14 +354,14 @@ def test_contact_type_pi_and_manager_are_self_service(pi, requestor):
     project = f.ProjectFactory(pi=pi)
     f.ProjectUserFactory(project=project, user=requestor, role=f.ProjectUserRoleChoiceFactory(name="Manager"))
 
-    assert tasks.contact_type_for(pi, project) == "self-service"
-    assert tasks.contact_type_for(requestor, project) == "self-service"
+    assert people.contact_type_for(pi, project) == "self-service"
+    assert people.contact_type_for(requestor, project) == "self-service"
 
 
 def test_contact_type_superuser_on_someone_elses_project_is_email(pi, django_user_model):
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
-    assert tasks.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
+    assert people.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
 
 
 # -- project_watchers --------------------------------------------------------------------------
@@ -389,19 +391,19 @@ def project_with_approvers(pi):
 
 
 def test_pi_request_watches_the_approvers(pi, project_with_approvers):
-    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
 
 
 def test_approver_request_watches_the_pi_and_the_other_approvers(project_with_approvers):
     approver = get_user_model().objects.get(username="bjones03")
 
-    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+    assert people.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
 
 
 def test_administrator_request_watches_the_pi_and_every_approver(project_with_approvers, django_user_model):
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
-    assert tasks.project_watchers(project_with_approvers, admin) == ["asmith02", "bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, admin) == ["asmith02", "bjones03", "czhang04"]
 
 
 def test_only_active_approvers_with_notifications_on_are_watchers(pi, project_with_approvers):
@@ -409,14 +411,14 @@ def test_only_active_approvers_with_notifications_on_are_watchers(pi, project_wi
     add_member(project_with_approvers, "egarcia06", status="Removed")
     add_member(project_with_approvers, "fkim07", enable_notifications=False)
 
-    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
 
 
 def test_the_pi_is_watched_even_without_notifications(project_with_approvers, pi):
     project_with_approvers.projectuser_set.filter(user=pi).update(enable_notifications=False)
     approver = get_user_model().objects.get(username="bjones03")
 
-    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+    assert people.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
 
 
 def test_approver_request_ticket_watches_the_pi_and_other_approvers(pi, project_with_approvers, use_client):
@@ -778,7 +780,7 @@ def test_the_latest_activation_is_the_one_that_counts(pi, ticketing_admin, admin
     set_status(in_request, other, allocation, f.AllocationStatusChoiceFactory(name="Active"))
     set_status(in_request, admin, allocation, allocation.status)  # an edit while Active isn't an activation
 
-    assert tasks.admin_request_approver(allocation, "Active") == "admin02"
+    assert people.admin_request_approver(allocation, "Active") == "admin02"
 
 
 def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, in_request, use_client):
@@ -795,7 +797,7 @@ def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, i
 def test_without_history_users_there_is_no_approver(pi):
     allocation, _ = make_storage_allocation(pi)  # saved outside a request
 
-    assert tasks.admin_request_approver(allocation, "Active") is None
+    assert people.admin_request_approver(allocation, "Active") is None
 
 
 def test_activation_of_a_non_storage_allocation_resolves_with_the_generic_message(pi, use_client):
