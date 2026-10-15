@@ -27,15 +27,15 @@ from coldfront.core.project.models import Project
 from django.utils import timezone
 
 from ticketing.allocation_updates import resource_label
-from ticketing.client import Incident, client_from_settings
+from ticketing.client import IncidentRef, client_from_settings
 from ticketing.models import FiledTicket
 from ticketing.tasks import (
     DONE_STATES,
     STATE_CLOSED,
-    allocation_correlation_id,
-    change_correlation_id,
+    AllocationTicketSlot,
+    TicketSlot,
     default_assignment,
-    project_users_correlation_id,
+    project_users_slot,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,14 +55,24 @@ class LinkError(Exception):
 
 @dataclass(frozen=True)
 class LinkTarget:
-    """A request an incident can be linked to."""
+    """A request an incident can be linked to: its ticket, and how the form offers it."""
 
-    correlation_id: str
+    slot: TicketSlot
     label: str
-    kind: str
-    subjects: dict = field(compare=False)
     group: str = field(default="", compare=False)  # an <optgroup> in the form; "" for none
     of: str = field(default="", compare=False)  # its allocation, when offered on a project's page
+
+    @property
+    def correlation_id(self) -> str:
+        return self.slot.correlation_id
+
+    @property
+    def kind(self) -> str:
+        return self.slot.kind
+
+    @property
+    def subjects(self) -> dict:
+        return self.slot.subjects
 
     @property
     def description(self) -> str:
@@ -72,8 +82,8 @@ class LinkTarget:
 
 @dataclass(frozen=True)
 class Linked:
-    incident: Incident
-    duplicate: Incident | None  # ColdFront's own incident, closed as a duplicate
+    incident: IncidentRef
+    duplicate: IncidentRef | None  # ColdFront's own incident, closed as a duplicate
 
 
 def allocation_label(allocation, resource=None) -> str:
@@ -100,10 +110,8 @@ def link_targets(subject) -> list[LinkTarget]:
     if isinstance(subject, Project):
         targets = [
             LinkTarget(
-                project_users_correlation_id(subject.pk),
+                project_users_slot(subject),
                 f"Today's user changes ({timezone.localdate():%Y-%m-%d})",
-                FiledTicket.Kind.PROJECT_USERS,
-                {"project": subject},
                 group=PROJECT_GROUP,
             )
         ]
@@ -117,27 +125,9 @@ def link_targets(subject) -> list[LinkTarget]:
 def _allocation_targets(allocation, of="") -> list[LinkTarget]:
     """The allocation's request and change requests; `of` names the allocation on a project's page,
     where each allocation's targets are grouped under it."""
-    targets = [
-        LinkTarget(
-            allocation_correlation_id(allocation.pk),
-            "The allocation request",
-            FiledTicket.Kind.ALLOCATION,
-            {"allocation": allocation},
-            group=of,
-            of=of,
-        )
-    ]
+    targets = [LinkTarget(AllocationTicketSlot.of_allocation(allocation), "The allocation request", group=of, of=of)]
     for change in allocation.allocationchangerequest_set.select_related("status").order_by("-created", "-pk"):
-        targets.append(
-            LinkTarget(
-                change_correlation_id(change.pk),
-                change_label(change),
-                FiledTicket.Kind.ALLOCATION_CHANGE,
-                {"allocation_change": change, "allocation": allocation},
-                group=of,
-                of=of,
-            )
-        )
+        targets.append(LinkTarget(AllocationTicketSlot.of_change(change), change_label(change), group=of, of=of))
     return targets
 
 
@@ -185,6 +175,7 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
         correlation_id=target.correlation_id,
         defaults={
             "kind": target.kind,
+            "table": target.slot.table,
             "number": incident.number,
             "sys_id": incident.sys_id,
             "source": FiledTicket.Source.LINKED,

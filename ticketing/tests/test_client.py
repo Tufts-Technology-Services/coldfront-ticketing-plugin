@@ -4,8 +4,8 @@ import pytest
 import responses
 from responses import matchers
 
-from ticketing.client import Incident, ServiceNowClient, ServiceNowError, UnknownReference
-from ticketing.tickets import Ticket
+from ticketing.client import IncidentRef, ServiceNowClient, ServiceNowError, UnknownReference
+from ticketing.tickets import ServiceNowIncident
 
 BASE = "https://servicenow.example"
 TABLE = f"{BASE}/api/now/v1/table"
@@ -31,7 +31,7 @@ def user_lookup(api, utln, sys_id):
 
 
 def ticket():
-    return Ticket(
+    return ServiceNowIncident(
         u_contact_person="jdoe01",
         caller_id="jdoe01",
         short_description="New allocation request",
@@ -54,7 +54,7 @@ def test_create_incident_resolves_references_and_returns_number(client, api):
 
     incident = client.create_incident(ticket())
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     body = json.loads(create.calls[0].request.body)
     assert body["caller_id"] == body["u_contact_person"] == "u-jdoe"
     assert body["assigned_to"] == "u-svc"
@@ -142,7 +142,7 @@ def test_find_incident_by_correlation_id(client, api):
         json={"result": [{"sys_id": "i-1", "number": "INC0000001"}]},
     )
 
-    assert client.find_incident("coldfront:allocation:7") == Incident(sys_id="i-1", number="INC0000001")
+    assert client.find_incident("coldfront:allocation:7") == IncidentRef(sys_id="i-1", number="INC0000001")
 
 
 @pytest.mark.parametrize(("stored", "expected"), [("u-svc", "u-svc"), ("", None)])
@@ -174,7 +174,7 @@ def test_find_incident_by_number_reports_its_correlation_id(client, api, stored,
 
     incident = client.find_incident_by_number("INC0000001")
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     assert incident.correlation_id == expected
 
 

@@ -8,7 +8,7 @@ from django.test import RequestFactory, override_settings
 from django.urls import reverse
 
 from ticketing import linking, tasks
-from ticketing.client import Incident, ServiceNowError
+from ticketing.client import IncidentRef, ServiceNowError
 from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import make_storage_allocation, make_storage_change
 from ticketing.tests.test_filed_tickets import render_card
@@ -37,7 +37,7 @@ class FakeServiceNow:
         return record
 
     def _incident(self, record):
-        return Incident(
+        return IncidentRef(
             sys_id=record["sys_id"],
             number=record["number"],
             state=record["state"],

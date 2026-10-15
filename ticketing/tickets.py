@@ -1,7 +1,7 @@
-"""Ticket dataclass and its conversion to a ServiceNow incident payload.
+"""ServiceNowIncident dataclass and its conversion to a ServiceNow incident payload.
 
-Adapted from rt-ticket-utils; the verbatim original is in docs/reference/ and docs/plan.md explains
-what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
+Adapted from rt-ticket-utils, where the dataclass is `Ticket`; the verbatim original is in
+docs/reference/ and docs/plan.md explains what changed and why. Pure stdlib -- no Django or ColdFront imports, so it is testable standalone.
 """
 
 import logging
@@ -17,10 +17,13 @@ LONG_TEXT_MAX_LENGTH = 4000
 LONG_TEXT_FIELDS = ("description", "close_notes", "comments", "work_notes")
 TRUNCATION_MARKER = "\n[truncated]"
 DEFAULT_BUSINESS_SERVICE = "High Performance Computing (HPC)"
+# u_action choice values: a new thing set up, or a change to an existing one.
+U_ACTION_ACTIVATE = "Activate/Setup/Install"
+U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"
 
 _WHITESPACE = re.compile(r"\s+")
 
-# Reference fields, and the (table, column) that identifies the record each one points at. A Ticket
+# Reference fields, and the (table, column) that identifies the record each one points at. A ServiceNowIncident
 # holds these in ColdFront's terms -- UTLNs, group names, incident numbers -- but the Table API
 # wants sys_ids, so to_payload() resolves them. UTLN == sys_user.user_name.
 #
@@ -41,7 +44,7 @@ REFERENCE_FIELDS = {
 
 
 @dataclass(kw_only=True)
-class Ticket:
+class ServiceNowIncident:
     """An incident, in ColdFront's terms.
 
     state/close_code/close_notes are resolution fields: leave them unset to open an incident, set
@@ -78,7 +81,7 @@ class Ticket:
     assignment_group: str = "TTS Research Technology"
     parent: str | None = None
     watch_list: list[str] | None = None
-    u_action: str = "Activate/Setup/Install"
+    u_action: str = U_ACTION_ACTIVATE
     state: str | None = None
     close_code: str | None = None
     close_notes: str | None = None
@@ -131,7 +134,7 @@ def to_update(fields: dict, resolve) -> dict:
     return body
 
 
-def to_payload(ticket: Ticket, resolve) -> dict:
+def to_payload(incident: ServiceNowIncident, resolve) -> dict:
     """Build the JSON body that creates an incident.
 
     `resolve(table, column, value)` returns the sys_id of the record where `column == value`; it is
@@ -141,10 +144,10 @@ def to_payload(ticket: Ticket, resolve) -> dict:
     A list member `resolve` can't find (it raises LookupError) is logged and left off, so one
     unknown watcher doesn't stop the ticket; any other unknown reference raises.
 
-    Updates (e.g. resolving) carry only a few fields, so they take a plain dict rather than a Ticket.
+    Updates (e.g. resolving) carry only a few fields, so they take a plain dict rather than a ServiceNowIncident.
     """
     payload = {}
-    for key, value in asdict(ticket).items():
+    for key, value in asdict(incident).items():
         if value is None or value == []:
             continue
         if key in REFERENCE_FIELDS:

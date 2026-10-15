@@ -15,6 +15,10 @@
 
     * not triggered yet (see docs/plan.md); the rest are wired up in ticketing.signals.
 
+Each request or event has one TicketSlot: the ticket ColdFront keeps for it -- its correlation_id,
+FiledTicket kind and subjects, and action -- whichever incident fills it. AllocationTicketSlot adds
+the allocation or change request it's for.
+
 Each request lifecycle shares one correlation_id, which is how the resolve task finds the incident
 the create task opened, and how any task that is re-run finds its own earlier work instead of filing
 a duplicate. Each ticket filed, found or resolved is recorded as a FiledTicket (ticketing.models), for
@@ -32,7 +36,7 @@ admin.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
 from coldfront.core.project.models import Project
@@ -40,7 +44,6 @@ from coldfront.core.utils.common import import_from_settings
 from coldfront.core.utils.mail import build_link
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
-from django.urls import reverse
 from django.utils import timezone
 
 from ticketing.allocation_updates import (
@@ -56,10 +59,17 @@ from ticketing.allocation_updates import (
     describe_request,
     resource_label,
 )
-from ticketing.client import Incident, UnknownReference, client_from_settings
+from ticketing.client import INCIDENT_TABLE, IncidentRef, UnknownReference, client_from_settings
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
-from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, REFERENCE_FIELDS, Ticket, clean_short_description
+from ticketing.tickets import (
+    DEFAULT_BUSINESS_SERVICE,
+    REFERENCE_FIELDS,
+    U_ACTION_ACTIVATE,
+    U_ACTION_MOVE_ADD_CHANGE,
+    ServiceNowIncident,
+    clean_short_description,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +83,102 @@ CLOSE_CODE_SOLVED_REMOTELY = "Solved Remotely (Permanently)"
 CONTACT_TYPE_SELF_SERVICE = "self-service"
 CONTACT_TYPE_EMAIL = "email"
 CONTACT_TYPE_MONITORING = "monitoring"
-U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"
-U_ACTION_ACTIVATE = "Activate/Setup/Install"
+
+
+# -- Ticket slots: the one ticket ColdFront keeps per request or event ----------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class TicketSlot:
+    """The one ticket ColdFront keeps for a request or event, whichever incident fills it.
+
+    The tasks fill it with an incident of their own, unless an admin has linked a customer's
+    (ticketing.linking). It says which ServiceNow table holds it (table) and how to find it there
+    (correlation_id), how to record it (kind and subjects, FiledTicket's fields), and what logs
+    call it (what). What the ticket says is decided elsewhere, with the content (the describe_*
+    functions); not the payload (tickets.ServiceNowIncident), a reference to an incident
+    (client.IncidentRef) or the local record of it (models.FiledTicket).
+
+    Only incidents are filed today, so `table` is always "incident"; see "Requests instead of
+    incidents?" in docs/plan.md for what other tables would take.
+    """
+
+    correlation_id: str
+    what: str
+    kind: str
+    subjects: dict = field(compare=False)
+    table: str = INCIDENT_TABLE
+
+
+@dataclass(frozen=True, kw_only=True)
+class AllocationTicketSlot(TicketSlot):
+    """The slot for an allocation or change request's ticket, with the request it's for.
+
+    Built from loaded objects (of_allocation, of_change), or by pk in a task (load). The one place
+    that knows each kind's correlation_id, subjects, approval status and storage job.
+    """
+
+    allocation: Allocation = field(compare=False)
+    request: Allocation | AllocationChangeRequest = field(compare=False)
+
+    @classmethod
+    def of_allocation(cls, allocation) -> "AllocationTicketSlot":
+        return cls(
+            correlation_id=allocation_correlation_id(allocation.pk),
+            what=f"allocation {allocation.pk}",
+            kind=FiledTicket.Kind.ALLOCATION,
+            subjects={"allocation": allocation},
+            allocation=allocation,
+            request=allocation,
+        )
+
+    @classmethod
+    def of_change(cls, change) -> "AllocationTicketSlot":
+        return cls(
+            correlation_id=change_correlation_id(change.pk),
+            what=f"allocation change {change.pk}",
+            kind=FiledTicket.Kind.ALLOCATION_CHANGE,
+            subjects={"allocation_change": change, "allocation": change.allocation},
+            allocation=change.allocation,
+            request=change,
+        )
+
+    @classmethod
+    def load(cls, allocation_pk, allocation_change_pk=None) -> "AllocationTicketSlot":
+        """The change request's ticket if `allocation_change_pk` is given, else the allocation's."""
+        if allocation_change_pk:
+            changes = AllocationChangeRequest.objects.select_related("allocation__project__pi")
+            return cls.of_change(changes.get(pk=allocation_change_pk))
+        return cls.of_allocation(Allocation.objects.select_related("project__pi").get(pk=allocation_pk))
+
+    @property
+    def is_change(self) -> bool:
+        return isinstance(self.request, AllocationChangeRequest)
+
+    @property
+    def approved_status(self) -> str:
+        """The request's status once approved (see request_approver)."""
+        return "Approved" if self.is_change else "Active"
+
+    @property
+    def job(self) -> str:
+        """What the storage plugin does once the request is approved."""
+        return "Quota change" if self.is_change else "Share creation"
+
+    @property
+    def url(self) -> str:
+        return build_link(self.request.get_absolute_url())
+
+    def storage_failure(self) -> TicketSlot:
+        """The slot for the admin-only ticket filed when this request's storage job fails
+        (file_storage_failure_ticket)."""
+        return TicketSlot(
+            correlation_id=storage_failure_correlation_id(self.correlation_id),
+            what=f"the storage job for {self.what}",
+            kind=FiledTicket.Kind.STORAGE_FAILURE,
+            subjects=self.subjects,
+            table=self.table,
+        )
 
 
 # -- HPC accounts: opened when the user has no UID yet, resolved when the account is created -----
@@ -82,6 +186,15 @@ U_ACTION_ACTIVATE = "Activate/Setup/Install"
 
 def hpc_account_correlation_id(username) -> str:
     return f"coldfront:hpc-account:{username}"
+
+
+def _hpc_account_slot(user) -> TicketSlot:
+    return TicketSlot(
+        correlation_id=hpc_account_correlation_id(user.username),
+        what=f"HPC account {user.username}",
+        kind=FiledTicket.Kind.HPC_ACCOUNT,
+        subjects={"user": user},
+    )
 
 
 def _hpc_account_people(user):
@@ -93,7 +206,7 @@ def _hpc_account_people(user):
     }
 
 
-def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
+def create_hpc_account_ticket(username: str, home_path: str) -> IncidentRef:
     """Open an incident for an HPC account that can't be created yet because the user has no UID.
 
     Admin-facing: says who signed up and that the account is waiting on a UID. Opened unassigned
@@ -104,21 +217,18 @@ def create_hpc_account_ticket(username: str, home_path: str) -> Incident:
     """
     user = get_user_model().objects.get(username=username)
     return _open_request(
-        correlation_id=hpc_account_correlation_id(user.username),
-        what=f"HPC account {user.username}",
+        _hpc_account_slot(user),
         people=lambda: _hpc_account_people(user),
-        kind=FiledTicket.Kind.HPC_ACCOUNT,
-        subjects={"user": user},
         describe=lambda requestor: RequestDescription(
             short_description=f"HPC Account Creation | {home_path}",
             description=render_to_string("ticketing/hpc_account_request.txt", {"user": user, "home_path": home_path}),
-            business_service=None,
+            business_service=DEFAULT_BUSINESS_SERVICE,
+            u_action=U_ACTION_ACTIVATE,
         ),
-        u_action=U_ACTION_ACTIVATE,
     )
 
 
-def resolve_hpc_account_ticket(username: str, home_path: str) -> Incident:
+def resolve_hpc_account_ticket(username: str, home_path: str) -> IncidentRef:
     """Welcome the user to their new HPC account, and close out its ticket.
 
     Mirrors the "HPC Account Creation" incidents staff file today: the welcome text goes in
@@ -129,24 +239,21 @@ def resolve_hpc_account_ticket(username: str, home_path: str) -> Incident:
     """
     user = get_user_model().objects.get(username=username)
     return _resolve_or_file(
-        correlation_id=hpc_account_correlation_id(user.username),
-        what=f"HPC account {user.username}",
+        _hpc_account_slot(user),
         people=lambda: _hpc_account_people(user),
-        kind=FiledTicket.Kind.HPC_ACCOUNT,
-        subjects={"user": user},
         describe=lambda: AllocationUpdate(
             short_description=f"HPC Account Creation | {home_path}",
             comments=render_to_string("ticketing/hpc_account_creation_notification.txt", {"user": user}),
             close_notes="Cluster account created!",
             business_service=DEFAULT_BUSINESS_SERVICE,
+            u_action=U_ACTION_ACTIVATE,
         ),
-        u_action=U_ACTION_ACTIVATE,
     )
 
 
 def create_group_membership_ticket(
     username: str, group: str, path: str, user_path: str, requestor_username: str | None = None
-) -> Incident | None:
+) -> IncidentRef | None:
     """File an already-resolved incident telling a user they've been added to a project group.
 
     Mirrors rt-ticket-utils' hpc_added_to_group_ticket_text: the notification covers the group
@@ -167,7 +274,7 @@ def create_group_membership_ticket(
 
 def create_group_removal_ticket(
     username: str, group: str, path: str, requestor_username: str | None = None
-) -> Incident | None:
+) -> IncidentRef | None:
     """File an already-resolved incident telling a user they've been removed from a project group.
 
     No rt-ticket-utils counterpart; the notification says which group and directory they've lost
@@ -187,7 +294,7 @@ def create_group_removal_ticket(
 
 def _group_ticket(
     *, change, username, group, requestor_username, short_description, template, context, close_notes
-) -> Incident | None:
+) -> IncidentRef | None:
     """File an already-resolved incident about `username` joining or leaving `group`.
 
     Ticketing admins get no ticket (returns None): they're staff, not customers of the group.
@@ -220,7 +327,7 @@ def _group_ticket(
         return existing
 
     on_behalf = requestor.pk != user.pk and is_ticketing_admin(requestor)
-    ticket = Ticket(
+    payload = ServiceNowIncident(
         u_contact_person=requestor.username,
         caller_id=user.username,
         watch_list=[requestor.username] if requestor.pk != user.pk else None,
@@ -235,7 +342,7 @@ def _group_ticket(
         close_code=CLOSE_CODE_SOLVED_REMOTELY,
         close_notes=close_notes,
     )
-    incident = client.create_incident(ticket)
+    incident = client.create_incident(payload)
     logger.info("Filed %s for %s", incident.number, what)
     return incident
 
@@ -247,7 +354,17 @@ def project_users_correlation_id(project_pk) -> str:
     return f"coldfront:project-users:{project_pk}:{timezone.localdate().isoformat()}"
 
 
-def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None) -> Incident:
+def project_users_slot(project) -> TicketSlot:
+    """The ticket for today's changes to `project`'s users."""
+    return TicketSlot(
+        correlation_id=project_users_correlation_id(project.pk),
+        what=f"user changes on project {project.pk}",
+        kind=FiledTicket.Kind.PROJECT_USERS,
+        subjects={"project": project},
+    )
+
+
+def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None) -> IncidentRef:
     """Tell a project's PI and Approvers that its users have changed today, and close out the ticket.
 
     The message is generic -- it names no users and doesn't say whether they were added or
@@ -260,19 +377,15 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
     the PI and Approvers are watch-listed.
     """
     project = Project.objects.select_related("pi").get(pk=project_pk)
-    correlation_id = project_users_correlation_id(project.pk)
-    what = f"user changes on project {project.pk}"
+    slot = project_users_slot(project)
 
-    filed = FiledTicket.objects.filter(correlation_id=correlation_id, resolved_at__isnull=False).first()
+    filed = FiledTicket.objects.filter(correlation_id=slot.correlation_id, resolved_at__isnull=False).first()
     if filed:
-        logger.info("Incident for %s today already filed as %s", what, filed.number)
-        return Incident(sys_id=filed.sys_id, number=filed.number)
-    url = build_link(reverse("project-detail", kwargs={"pk": project.pk}))
+        logger.info("Incident for %s today already filed as %s", slot.what, filed.number)
+        return IncidentRef(sys_id=filed.sys_id, number=filed.number)
+    url = build_link(project.get_absolute_url())
     return _resolve_or_file(
-        correlation_id=correlation_id,
-        what=what,
-        kind=FiledTicket.Kind.PROJECT_USERS,
-        subjects={"project": project},
+        slot,
         people=lambda: _people_fields(project, requestor_pk),
         describe=lambda: AllocationUpdate(
             short_description=clean_short_description(f"Project Users Changed | {project.title}"),
@@ -281,8 +394,8 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
             ),
             close_notes="Project users updated.",
             business_service="Research Data Storage",
+            u_action=U_ACTION_MOVE_ADD_CHANGE,
         ),
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
 
 
@@ -321,7 +434,7 @@ def project_watchers(project, *people) -> list[str]:
 
 
 def _people_fields(project, requestor_pk, affected_pk=None):
-    """The requestor, and the Ticket people fields for a request about `project`.
+    """The requestor, and the ServiceNowIncident people fields for a request about `project`.
 
     The requestor -- whoever submitted the request -- is the contact person (u_contact_person) and
     decides contact_type. The affected client (caller_id) is who the request is for, which ServiceNow
@@ -384,10 +497,10 @@ def _known_user(client, utln, what) -> str:
     return utln
 
 
-def _filed(correlation_id) -> Incident | None:
+def _filed(correlation_id) -> IncidentRef | None:
     """The incident recorded locally for `correlation_id`, if any, sparing a ServiceNow lookup."""
     filed = FiledTicket.objects.filter(correlation_id=correlation_id).first()
-    return Incident(sys_id=filed.sys_id, number=filed.number) if filed else None
+    return IncidentRef(sys_id=filed.sys_id, number=filed.number) if filed else None
 
 
 def default_assignment(incident) -> dict:
@@ -402,60 +515,64 @@ def _resolution(close_notes, comments=None) -> dict:
     return {**fields, "comments": comments} if comments else fields
 
 
-def _record(incident, correlation_id, kind, subjects, *, resolved=None):
-    """Record `incident` as a FiledTicket, or update the record. `resolved` True stamps resolved_at,
-    False clears it (reopened), and None leaves it alone.
+def _record(incident, slot: TicketSlot, *, resolved=None):
+    """Record `incident` as filling `slot` (its FiledTicket), or update the record. `resolved`
+    True stamps resolved_at, False clears it (reopened), and None leaves it alone.
 
     The ticket is already in ServiceNow, so a failure here is logged rather than raised. A later
     task for the same correlation_id finds it in ServiceNow and records it then.
     """
-    defaults = {"kind": kind, "number": incident.number, "sys_id": incident.sys_id, **subjects}
+    defaults = {
+        "kind": slot.kind,
+        "table": slot.table,
+        "number": incident.number,
+        "sys_id": incident.sys_id,
+        **slot.subjects,
+    }
     if resolved is not None:
         defaults["resolved_at"] = timezone.now() if resolved else None
     try:
-        FiledTicket.objects.update_or_create(correlation_id=correlation_id, defaults=defaults)
+        FiledTicket.objects.update_or_create(correlation_id=slot.correlation_id, defaults=defaults)
     except Exception:
-        logger.exception("Filed %s for %s, but couldn't record it locally", incident.number, correlation_id)
+        logger.exception("Filed %s for %s, but couldn't record it locally", incident.number, slot.correlation_id)
 
 
-def _open_request(*, correlation_id, what, kind, subjects, people, describe, u_action) -> Incident:
+def _open_request(slot: TicketSlot, *, people, describe) -> IncidentRef:
     """Open an incident for a request, or return the one already filed for it.
 
-    `people()` returns (requestor, the Ticket people fields), and `describe(requestor)` the
-    RequestDescription; both are only called if a ticket is needed. The incident is recorded as a
-    FiledTicket of `kind` about `subjects` (FiledTicket fields: allocation, project, ...).
+    `people()` returns (requestor, the ServiceNowIncident people fields), and `describe(requestor)`
+    the RequestDescription; both are only called if a ticket is needed. The incident is recorded as
+    filling `slot`.
     """
-    existing = _filed(correlation_id)
+    existing = _filed(slot.correlation_id)
     if existing:
-        logger.info("Incident for %s already filed as %s", what, existing.number)
+        logger.info("Incident for %s already filed as %s", slot.what, existing.number)
         return existing
     client = client_from_settings()
-    existing = client.find_incident(correlation_id)
+    existing = client.find_incident(slot.correlation_id)
     if existing:
-        logger.info("Incident for %s already filed as %s", what, existing.number)
-        _record(existing, correlation_id, kind, subjects)
+        logger.info("Incident for %s already filed as %s", slot.what, existing.number)
+        _record(existing, slot)
         return existing
 
     requestor, people_fields = people()
     request = describe(requestor)
-    ticket = Ticket(
+    payload = ServiceNowIncident(
         **people_fields,
         short_description=request.short_description,
         description=request.description,
         u_business_service=request.business_service,
-        u_action=u_action,
+        u_action=request.u_action,
         # No assigned_to: the request waits in the assignment group's queue for an admin.
-        correlation_id=correlation_id,
+        correlation_id=slot.correlation_id,
     )
-    incident = client.create_incident(ticket)
-    logger.info("Filed %s for %s", incident.number, what)
-    _record(incident, correlation_id, kind, subjects)
+    incident = client.create_incident(payload)
+    logger.info("Filed %s for %s", incident.number, slot.what)
+    _record(incident, slot)
     return incident
 
 
-def _resolve_or_file(
-    *, correlation_id, what, kind, subjects, people, describe, u_action, assignee=None
-) -> Incident | None:
+def _resolve_or_file(slot: TicketSlot, *, people, describe, assignee=None) -> IncidentRef | None:
     """Resolve the request's incident with a customer message, or file one already resolved.
 
     `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
@@ -474,40 +591,40 @@ def _resolve_or_file(
     try:
         update = describe()
     except UnsupportedUpdate as e:
-        logger.info("No customer message for %s: %s", what, e)
+        logger.info("No customer message for %s: %s", slot.what, e)
         return None
 
     resolution = _resolution(update.close_notes, update.comments)
     client = client_from_settings()
-    existing = client.find_incident(correlation_id)
+    existing = client.find_incident(slot.correlation_id)
     if existing and existing.state in DONE_STATES:
-        logger.info("Incident %s for %s is already resolved", existing.number, what)
-        _record(existing, correlation_id, kind, subjects)
+        logger.info("Incident %s for %s is already resolved", existing.number, slot.what)
+        _record(existing, slot)
         return existing
 
     chosen = assignee() if assignee else None
     if chosen:
-        chosen = _known_user(client, chosen, what)
+        chosen = _known_user(client, chosen, slot.what)
 
     if existing:
         assignment = {"assigned_to": chosen} if chosen else default_assignment(existing)
         client.update_incident(existing.sys_id, {**assignment, **resolution})
-        logger.info("Resolved %s for %s", existing.number, what)
+        logger.info("Resolved %s for %s", existing.number, slot.what)
         incident = existing
     else:
         _, people_fields = people()
-        ticket = Ticket(
+        payload = ServiceNowIncident(
             **people_fields,
             short_description=update.short_description,
             u_business_service=update.business_service,
-            u_action=u_action,
-            assigned_to=chosen or _known_user(client, None, what),
-            correlation_id=correlation_id,
+            u_action=update.u_action,
+            assigned_to=chosen or _known_user(client, None, slot.what),
+            correlation_id=slot.correlation_id,
             **resolution,
         )
-        incident = client.create_incident(ticket)
-        logger.info("Filed %s for %s", incident.number, what)
-    _record(incident, correlation_id, kind, subjects, resolved=True)
+        incident = client.create_incident(payload)
+        logger.info("Filed %s for %s", incident.number, slot.what)
+    _record(incident, slot, resolved=True)
     return incident
 
 
@@ -518,13 +635,9 @@ def allocation_correlation_id(allocation_pk) -> str:
     return f"coldfront:allocation:{allocation_pk}"
 
 
-def _allocation(allocation_pk):
-    return Allocation.objects.select_related("project__pi").get(pk=allocation_pk)
-
-
 def create_allocation_ticket(
     allocation_pk: int, requestor_pk: int | None = None, affected_pk: int | None = None
-) -> Incident:
+) -> IncidentRef:
     """Open an incident for a newly requested allocation.
 
     Every allocation request gets one (see describe_new_allocation): once core's
@@ -533,21 +646,17 @@ def create_allocation_ticket(
     starts it Active. The requestor is the contact person, and `affected_pk` the affected client if
     it isn't them (see _people_fields). Safe to re-run.
     """
-    allocation = _allocation(allocation_pk)
+    slot = AllocationTicketSlot.load(allocation_pk)
     return _open_request(
-        correlation_id=allocation_correlation_id(allocation.pk),
-        what=f"allocation {allocation.pk}",
-        kind=FiledTicket.Kind.ALLOCATION,
-        subjects={"allocation": allocation},
-        people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
-        describe=lambda requestor: describe_new_allocation(allocation, requestor),
-        u_action=U_ACTION_ACTIVATE,
+        slot,
+        people=lambda: _people_fields(slot.allocation.project, requestor_pk, affected_pk),
+        describe=lambda requestor: describe_new_allocation(slot.allocation, requestor),
     )
 
 
 def resolve_allocation_ticket(
     allocation_pk: int, requestor_pk: int | None = None, affected_pk: int | None = None
-) -> Incident | None:
+) -> IncidentRef | None:
     """Tell the requester their allocation is active, and close out its ticket.
 
     The message depends on the allocation's resource (ticketing.allocation_updates): Storage's, or
@@ -557,16 +666,12 @@ def resolve_allocation_ticket(
     them the PI is the caller. If a ticketing admin submitted the request, it is assigned to the admin who
     activated it (admin_request_approver). Safe to re-run.
     """
-    allocation = _allocation(allocation_pk)
+    slot = AllocationTicketSlot.load(allocation_pk)
     return _resolve_or_file(
-        correlation_id=allocation_correlation_id(allocation.pk),
-        what=f"allocation {allocation.pk}",
-        kind=FiledTicket.Kind.ALLOCATION,
-        subjects={"allocation": allocation},
-        people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
-        describe=lambda: describe_activation(allocation),
-        u_action=U_ACTION_ACTIVATE,
-        assignee=lambda: admin_request_approver(allocation, "Active"),
+        slot,
+        people=lambda: _people_fields(slot.allocation.project, requestor_pk, affected_pk),
+        describe=lambda: describe_activation(slot.allocation),
+        assignee=lambda: admin_request_approver(slot.request, slot.approved_status),
     )
 
 
@@ -577,13 +682,9 @@ def change_correlation_id(allocation_change_pk) -> str:
     return f"coldfront:allocation-change:{allocation_change_pk}"
 
 
-def _change(allocation_change_pk):
-    return AllocationChangeRequest.objects.select_related("allocation__project__pi").get(pk=allocation_change_pk)
-
-
 def create_allocation_change_ticket(
     allocation_change_pk: int, requestor_pk: int | None = None, affected_pk: int | None = None
-) -> Incident:
+) -> IncidentRef:
     """Open an incident for a newly submitted allocation change request.
 
     Every change request gets one (see describe_request); resolve_allocation_change_ticket later
@@ -591,21 +692,17 @@ def create_allocation_change_ticket(
     instance starts it Active. The requestor is the contact person, and `affected_pk` the affected
     client if it isn't them (see _people_fields). Safe to re-run.
     """
-    change = _change(allocation_change_pk)
+    slot = AllocationTicketSlot.load(None, allocation_change_pk)
     return _open_request(
-        correlation_id=change_correlation_id(change.pk),
-        what=f"allocation change {change.pk}",
-        kind=FiledTicket.Kind.ALLOCATION_CHANGE,
-        subjects={"allocation_change": change, "allocation": change.allocation},
-        people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
-        describe=lambda requestor: describe_request(change, requestor),
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
+        slot,
+        people=lambda: _people_fields(slot.allocation.project, requestor_pk, affected_pk),
+        describe=lambda requestor: describe_request(slot.request, requestor),
     )
 
 
 def resolve_allocation_change_ticket(
     allocation_change_pk: int, requestor_pk: int | None = None, affected_pk: int | None = None
-) -> Incident | None:
+) -> IncidentRef | None:
     """Tell the requester their approved allocation change has been made, and close out its ticket.
 
     The message depends on the allocation's resource (ticketing.allocation_updates): Storage's for
@@ -615,16 +712,12 @@ def resolve_allocation_change_ticket(
     matter then -- without them the PI is the caller. If a ticketing admin submitted the request, it
     is assigned to the admin who approved it (admin_request_approver). Safe to re-run.
     """
-    change = _change(allocation_change_pk)
+    slot = AllocationTicketSlot.load(None, allocation_change_pk)
     return _resolve_or_file(
-        correlation_id=change_correlation_id(change.pk),
-        what=f"allocation change {change.pk}",
-        kind=FiledTicket.Kind.ALLOCATION_CHANGE,
-        subjects={"allocation_change": change, "allocation": change.allocation},
-        people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
-        describe=lambda: describe_change(change),
-        u_action=U_ACTION_MOVE_ADD_CHANGE,
-        assignee=lambda: admin_request_approver(change, "Approved"),
+        slot,
+        people=lambda: _people_fields(slot.allocation.project, requestor_pk, affected_pk),
+        describe=lambda: describe_change(slot.request),
+        assignee=lambda: admin_request_approver(slot.request, slot.approved_status),
     )
 
 
@@ -638,52 +731,9 @@ def storage_failure_correlation_id(request_correlation_id) -> str:
     return f"{request_correlation_id}{STORAGE_FAILURE_SUFFIX}"
 
 
-@dataclass(frozen=True)
-class _StorageJob:
-    """The request a storage job was for, and how to describe it."""
-
-    allocation: Allocation
-    request: Allocation | AllocationChangeRequest
-    approved_status: str
-    correlation_id: str  # the request's
-    what: str
-    job: str
-    url: str
-    subjects: dict
-    u_action: str
-
-
-def _storage_job(allocation_pk, allocation_change_pk) -> _StorageJob:
-    if allocation_change_pk:
-        change = _change(allocation_change_pk)
-        return _StorageJob(
-            allocation=change.allocation,
-            request=change,
-            approved_status="Approved",
-            correlation_id=change_correlation_id(change.pk),
-            what=f"allocation change {change.pk}",
-            job="Quota change",
-            url=build_link(change.get_absolute_url()),
-            subjects={"allocation_change": change, "allocation": change.allocation},
-            u_action=U_ACTION_MOVE_ADD_CHANGE,
-        )
-    allocation = _allocation(allocation_pk)
-    return _StorageJob(
-        allocation=allocation,
-        request=allocation,
-        approved_status="Active",
-        correlation_id=allocation_correlation_id(allocation.pk),
-        what=f"allocation {allocation.pk}",
-        job="Share creation",
-        url=build_link(allocation.get_absolute_url()),
-        subjects={"allocation": allocation},
-        u_action=U_ACTION_ACTIVATE,
-    )
-
-
 def file_storage_failure_ticket(
     allocation_pk: int, allocation_change_pk: int | None = None, state: str = "failed"
-) -> Incident | None:
+) -> IncidentRef | None:
     """Tell admins a storage job failed, in a ticket only admins are on.
 
     `state` is the storage plugin's failed value (share_creation_state for an allocation,
@@ -699,33 +749,30 @@ def file_storage_failure_ticket(
     success resolves it (resolve_storage_failure_ticket). Safe to re-run, though a re-run of a
     repeat adds its work note again.
     """
-    job = _storage_job(allocation_pk, allocation_change_pk)
-    correlation_id = storage_failure_correlation_id(job.correlation_id)
-    what = f"the storage job for {job.what}"
+    request = AllocationTicketSlot.load(allocation_pk, allocation_change_pk)
+    failure = request.storage_failure()
     client = client_from_settings()
 
-    existing = client.find_incident(correlation_id)
+    existing = client.find_incident(failure.correlation_id)
     if existing:
         if existing.state == STATE_CLOSED:
-            logger.warning("%s failed again (%s), but its ticket %s is closed", what, state, existing.number)
+            logger.warning("%s failed again (%s), but its ticket %s is closed", failure.what, state, existing.number)
             return existing
         reopen = existing.state == STATE_RESOLVED
-        note = {"work_notes": f"{job.job} failed again: {state}"}
+        note = {"work_notes": f"{request.job} failed again: {state}"}
         client.update_incident(existing.sys_id, {**note, "state": STATE_ACTIVE} if reopen else note)
-        logger.info("Noted a repeat failure of %s on %s", what, existing.number)
-        _record(
-            existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects, resolved=False if reopen else None
-        )
+        logger.info("Noted a repeat failure of %s on %s", failure.what, existing.number)
+        _record(existing, failure, resolved=False if reopen else None)
         return existing
 
-    parent = _filed(job.correlation_id) or client.find_incident(job.correlation_id)
-    approver = request_approver(job.request, job.approved_status)
-    person = _known_user(client, approver, what)
-    allocation = job.allocation
+    parent = _filed(request.correlation_id) or client.find_incident(request.correlation_id)
+    approver = request_approver(request.request, request.approved_status)
+    person = _known_user(client, approver, failure.what)
+    allocation = request.allocation
     resource = allocation.get_parent_resource
     label = resource_label(allocation, resource)
     context = {
-        "job": job.job,
+        "job": request.job,
         "state": state,
         "allocation": allocation,
         "project": allocation.project,
@@ -735,40 +782,40 @@ def file_storage_failure_ticket(
         "quota": allocation.get_attribute(QUOTA_ATTRIBUTE_NAME),
         "parent": parent,
         "approver": approver,
-        "url": job.url,
+        "url": request.url,
     }
-    ticket = Ticket(
+    payload = ServiceNowIncident(
         u_contact_person=person,
         caller_id=person,
         contact_type=CONTACT_TYPE_MONITORING,
         short_description=clean_short_description(f"{label}: Storage Job Failed | {allocation.project.title}"),
         description=render_to_string("ticketing/storage_failure.txt", context),
         u_business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE["Storage"],
-        u_action=job.u_action,
+        u_action=U_ACTION_MOVE_ADD_CHANGE if request.is_change else U_ACTION_ACTIVATE,
         parent=parent.number if parent else None,
-        correlation_id=correlation_id,
+        correlation_id=failure.correlation_id,
     )
-    incident = client.create_incident(ticket)
-    logger.info("Filed %s for %s", incident.number, what)
-    _record(incident, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects)
+    incident = client.create_incident(payload)
+    logger.info("Filed %s for %s", incident.number, failure.what)
+    _record(incident, failure)
     return incident
 
 
-def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int | None = None) -> Incident | None:
+def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int | None = None) -> IncidentRef | None:
     """Resolve a storage job's failure ticket once the job has succeeded; no-op if there's none open.
 
     Queued alongside the request's own resolve, only when a failure ticket is recorded and not yet
     resolved (see ticketing.signals). Assigned to TICKETING_ASSIGNED_TO if no one picked it up.
     """
-    job = _storage_job(allocation_pk, allocation_change_pk)
-    correlation_id = storage_failure_correlation_id(job.correlation_id)
+    request = AllocationTicketSlot.load(allocation_pk, allocation_change_pk)
+    failure = request.storage_failure()
     client = client_from_settings()
-    existing = client.find_incident(correlation_id)
+    existing = client.find_incident(failure.correlation_id)
     if existing is None or existing.state in DONE_STATES:
         return existing
     client.update_incident(
-        existing.sys_id, {**default_assignment(existing), **_resolution(f"{job.job} succeeded on a later attempt.")}
+        existing.sys_id, {**default_assignment(existing), **_resolution(f"{request.job} succeeded on a later attempt.")}
     )
-    logger.info("Resolved %s for the storage job for %s", existing.number, job.what)
-    _record(existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects, resolved=True)
+    logger.info("Resolved %s for %s", existing.number, failure.what)
+    _record(existing, failure, resolved=True)
     return existing

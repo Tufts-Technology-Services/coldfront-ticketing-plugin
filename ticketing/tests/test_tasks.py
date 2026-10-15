@@ -6,8 +6,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 
 from ticketing import tasks
-from ticketing.client import Incident
-from ticketing.tests.test_allocation_updates import FakeServiceNow
+from ticketing.client import IncidentRef
+from ticketing.tests.test_allocation_updates import FakeServiceNow, make_storage_allocation, make_storage_change
 
 
 class FakeClient:
@@ -25,7 +25,7 @@ class FakeClient:
 
     def create_incident(self, ticket):
         self.created.append(ticket)
-        return Incident(sys_id="i-1", number="INC0000001")
+        return IncidentRef(sys_id="i-1", number="INC0000001")
 
     def update_incident(self, sys_id, fields):
         self.updated.append((sys_id, fields))
@@ -56,7 +56,7 @@ pytestmark = pytest.mark.django_db
 def test_account_waiting_on_a_uid_opens_an_incident_for_admins(requestor, fake_client):
     incident = tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
     assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.contact_type == "self-service"
@@ -69,7 +69,7 @@ def test_account_waiting_on_a_uid_opens_an_incident_for_admins(requestor, fake_c
 
 
 def test_account_waiting_on_a_uid_rerun_returns_the_existing_incident(requestor, use_client):
-    existing = Incident(sys_id="i-0", number="INC0000000", state="1")
+    existing = IncidentRef(sys_id="i-0", number="INC0000000", state="1")
     client = use_client(FakeClient(existing=existing))
 
     assert tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == existing
@@ -78,9 +78,9 @@ def test_account_waiting_on_a_uid_rerun_returns_the_existing_incident(requestor,
 
 
 def test_account_created_resolves_the_waiting_incident_with_the_welcome(requestor, use_client):
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="1")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="1")))
 
-    assert tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == Incident("i-0", "INC0000000")
+    assert tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == IncidentRef("i-0", "INC0000000")
 
     assert client.looked_up == ["coldfront:hpc-account:jdoe01"]
     [(sys_id, fields)] = client.updated
@@ -96,7 +96,7 @@ def test_account_created_resolves_the_waiting_incident_with_the_welcome(requesto
 def test_account_created_without_a_waiting_incident_files_a_resolved_one(requestor, fake_client):
     incident = tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
     assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.assigned_to == "svc_test"  # TICKETING_ASSIGNED_TO in tests/settings.py
@@ -136,7 +136,7 @@ def test_waiting_then_created_resolves_the_same_incident(requestor, use_client):
 
 
 def test_account_already_resolved_is_left_alone(requestor, use_client):
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="6")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="6")))
 
     tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
@@ -166,7 +166,7 @@ def add_to_group(requestor_username=None):
 
 
 def test_group_membership_files_a_resolved_incident_for_the_added_user(requestor, pi, fake_client):
-    assert add_to_group("asmith02") == Incident(sys_id="i-1", number="INC0000001")
+    assert add_to_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
     assert ticket.caller_id == "jdoe01"
@@ -230,7 +230,7 @@ def remove_from_group(requestor_username=None):
 
 
 def test_group_removal_files_a_resolved_incident_for_the_removed_user(requestor, pi, fake_client):
-    assert remove_from_group("asmith02") == Incident(sys_id="i-1", number="INC0000001")
+    assert remove_from_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
     assert ticket.caller_id == "jdoe01"
@@ -264,7 +264,7 @@ def test_group_removal_files_nothing_for_a_superuser(django_user_model, fake_cli
 
 
 def test_group_membership_rerun_returns_the_existing_incident(requestor, monkeypatch):
-    existing = Incident(sys_id="i-0", number="INC0000000")
+    existing = IncidentRef(sys_id="i-0", number="INC0000000")
     client = FakeClient(existing=existing)
     monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
 
@@ -274,13 +274,13 @@ def test_group_membership_rerun_returns_the_existing_incident(requestor, monkeyp
 
 
 def test_group_membership_on_a_later_day_files_a_new_incident(requestor, today, monkeypatch):
-    client = FakeClient(existing=Incident(sys_id="i-0", number="INC0000000"))
+    client = FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000"))
     monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
     add_to_group()
 
     today["today"] = datetime.date(2026, 10, 5)
     client.existing = None  # nothing filed under the new day's correlation_id
-    assert add_to_group() == Incident(sys_id="i-1", number="INC0000001")
+    assert add_to_group() == IncidentRef(sys_id="i-1", number="INC0000001")
 
     assert client.looked_up == [
         "coldfront:group-add:lab_smith:jdoe01:2026-09-28",
@@ -306,7 +306,7 @@ def project(pi):
 def test_files_a_resolved_notice_for_the_project(project, requestor, fake_client):
     incident = tasks.create_project_users_ticket(project.pk, requestor_pk=requestor.pk)
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
     assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02", "bjones03"]  # the PI and the Approver
@@ -347,7 +347,7 @@ def test_without_a_requestor_the_pi_stands_in(project, fake_client):
 
 
 def test_another_change_the_same_day_files_nothing(project, use_client):
-    existing = Incident(sys_id="i-0", number="INC0000000", state="6")
+    existing = IncidentRef(sys_id="i-0", number="INC0000000", state="6")
     client = use_client(FakeClient(existing=existing))
 
     assert tasks.create_project_users_ticket(project.pk) == existing
@@ -364,3 +364,43 @@ def test_a_change_on_a_later_day_files_a_new_notice(project, today, fake_client)
         f"coldfront:project-users:{project.pk}:2026-09-28",
         f"coldfront:project-users:{project.pk}:2026-09-29",
     ]
+
+
+# -- AllocationTicketSlot ------------------------------------------------------------------------
+
+
+def test_an_allocation_ticket_slot_knows_its_allocation_request(pi):
+    allocation, _ = make_storage_allocation(pi)
+
+    ticket = tasks.AllocationTicketSlot.load(allocation.pk)
+
+    assert ticket.correlation_id == f"coldfront:allocation:{allocation.pk}"
+    assert ticket.kind == "allocation"
+    assert ticket.subjects == {"allocation": allocation}
+    assert ticket.table == "incident"
+    assert (ticket.approved_status, ticket.job) == ("Active", "Share creation")
+    assert ticket.url.endswith(f"/allocation/{allocation.pk}/")
+
+
+def test_an_allocation_ticket_slot_loads_the_change_request_when_given_one(pi):
+    change = make_storage_change(pi)
+
+    ticket = tasks.AllocationTicketSlot.load(change.allocation.pk, change.pk)
+
+    assert ticket == tasks.AllocationTicketSlot.of_change(change)
+    assert ticket.correlation_id == f"coldfront:allocation-change:{change.pk}"
+    assert ticket.subjects == {"allocation_change": change, "allocation": change.allocation}
+    assert (ticket.request, ticket.allocation) == (change, change.allocation)
+    assert (ticket.approved_status, ticket.job) == ("Approved", "Quota change")
+    assert ticket.table == "incident"
+
+
+def test_a_storage_failure_slot_is_about_the_same_request(pi):
+    change = make_storage_change(pi)
+
+    failure = tasks.AllocationTicketSlot.of_change(change).storage_failure()
+
+    assert failure.correlation_id == f"coldfront:allocation-change:{change.pk}:storage-failed"
+    assert failure.kind == "storage-failure"
+    assert failure.subjects == {"allocation_change": change, "allocation": change.allocation}
+    assert failure.what == f"the storage job for allocation change {change.pk}"

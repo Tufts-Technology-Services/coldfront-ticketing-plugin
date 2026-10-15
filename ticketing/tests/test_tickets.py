@@ -4,7 +4,7 @@ from ticketing.tickets import (
     LONG_TEXT_MAX_LENGTH,
     SHORT_DESCRIPTION_MAX_LENGTH,
     TRUNCATION_MARKER,
-    Ticket,
+    ServiceNowIncident,
     fit_update,
     to_payload,
     to_update,
@@ -24,7 +24,7 @@ def make(**overrides):
         "assigned_to": "svc_test",
     }
     kwargs.update(overrides)
-    return Ticket(**kwargs)
+    return ServiceNowIncident(**kwargs)
 
 
 def test_people_fields_resolve_from_utln_to_sys_user():

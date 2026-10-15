@@ -15,7 +15,7 @@ from ticketing.allocation_updates import (
     human_name,
     storage_will_provision,
 )
-from ticketing.client import Incident, UnknownReference
+from ticketing.client import IncidentRef, UnknownReference
 
 pytestmark = pytest.mark.django_db
 
@@ -74,7 +74,7 @@ class FakeClient:
 
     def create_incident(self, ticket):
         self.created.append(ticket)
-        return Incident(sys_id="i-1", number="INC0000001")
+        return IncidentRef(sys_id="i-1", number="INC0000001")
 
     def update_incident(self, sys_id, fields):
         self.updated.append((sys_id, fields))
@@ -271,9 +271,9 @@ def test_storage_doesnt_provision_other_resource_types_or_none(pi):
 
 def test_resolves_the_open_incident_for_the_change(pi, use_client):
     change = make_storage_change(pi)
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="2")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="2")))
 
-    assert tasks.resolve_allocation_change_ticket(change.pk) == Incident(sys_id="i-0", number="INC0000000")
+    assert tasks.resolve_allocation_change_ticket(change.pk) == IncidentRef(sys_id="i-0", number="INC0000000")
     assert client.looked_up == f"coldfront:allocation-change:{change.pk}"
     [(sys_id, fields)] = client.updated
     assert sys_id == "i-0"
@@ -287,7 +287,7 @@ def test_resolves_the_open_incident_for_the_change(pi, use_client):
 
 def test_resolving_keeps_the_assignee_an_admin_set(pi, use_client):
     change = make_storage_change(pi)
-    picked_up = Incident(sys_id="i-0", number="INC0000000", state="2", assigned_to="u-admin")
+    picked_up = IncidentRef(sys_id="i-0", number="INC0000000", state="2", assigned_to="u-admin")
     client = use_client(FakeClient(existing=picked_up))
 
     tasks.resolve_allocation_change_ticket(change.pk)
@@ -299,7 +299,7 @@ def test_resolving_keeps_the_assignee_an_admin_set(pi, use_client):
 
 def test_already_resolved_incident_is_not_commented_on_again(pi, use_client):
     change = make_storage_change(pi)
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="6")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="6")))
 
     tasks.resolve_allocation_change_ticket(change.pk)
 
@@ -339,7 +339,7 @@ def test_without_a_requestor_the_pi_is_the_caller(pi, use_client):
 def test_unsupported_change_leaves_servicenow_alone(pi, use_client):
     change = make_storage_change(pi)
     change.allocation.resources.clear()
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="2")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="2")))
 
     assert tasks.resolve_allocation_change_ticket(change.pk) is None
     assert client.updated == [] and client.created == []
@@ -472,7 +472,7 @@ class FakeServiceNow:
     """Remembers incidents by correlation_id, so a create -> resolve lifecycle can be followed."""
 
     def __init__(self):
-        self.incidents = {}  # correlation_id -> (Incident, fields)
+        self.incidents = {}  # correlation_id -> (IncidentRef, fields)
 
     def find_incident(self, correlation_id):
         found = self.incidents.get(correlation_id)
@@ -483,7 +483,7 @@ class FakeServiceNow:
 
     def create_incident(self, ticket):
         n = len(self.incidents) + 1
-        incident = Incident(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
+        incident = IncidentRef(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
         self.incidents[ticket.correlation_id] = (incident, vars(ticket).copy())
         return incident
 
@@ -492,7 +492,7 @@ class FakeServiceNow:
             if incident.sys_id == sys_id:
                 stored.update(fields)
                 self.incidents[cid] = (
-                    Incident(sys_id, incident.number, state=fields.get("state", incident.state)),
+                    IncidentRef(sys_id, incident.number, state=fields.get("state", incident.state)),
                     stored,
                 )
 
@@ -598,7 +598,7 @@ def test_every_new_allocation_gets_a_request_ticket(pi, use_client):
 
     [(_, ticket)] = snow.incidents.values()
     assert ticket["short_description"] == f"Research Cluster: New Allocation Request | {allocation.project.title}"
-    assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # Ticket default
+    assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # ServiceNowIncident default
 
 
 def test_the_new_allocation_request_description_leaves_out_private_attributes(pi, requestor):
@@ -726,7 +726,7 @@ def admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, sn
     change = make_storage_change(pi)
     set_status(in_request, admin, change, f.AllocationChangeStatusChoiceFactory(name="Approved"))
     cid = f"coldfront:allocation-change:{change.pk}"
-    snow.incidents[cid] = (Incident("i-9", "INC0000009", "2", assigned_to=assigned_to), {})
+    snow.incidents[cid] = (IncidentRef("i-9", "INC0000009", "2", assigned_to=assigned_to), {})
     return change, cid
 
 
@@ -737,7 +737,7 @@ def test_an_admins_requests_linked_incident_is_assigned_to_the_approver(
     snow = use_client(FakeServiceNow())
     change, cid = admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow, assigned_to)
 
-    assert tasks.resolve_allocation_change_ticket(change.pk) == Incident("i-9", "INC0000009")
+    assert tasks.resolve_allocation_change_ticket(change.pk) == IncidentRef("i-9", "INC0000009")
     _, fields = snow.incidents[cid]
     assert fields["state"] == "6"
     assert fields["assigned_to"] == "admin01"  # even over an assignee already set

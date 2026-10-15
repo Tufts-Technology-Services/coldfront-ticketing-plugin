@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from ticketing import tasks
-from ticketing.client import Incident
+from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import FakeServiceNow, make_storage_allocation, make_storage_change
 
@@ -106,6 +106,7 @@ def test_opening_a_request_records_it(pi, snow):
     assert (ticket.number, ticket.sys_id) == (incident.number, incident.sys_id)
     assert ticket.correlation_id == f"coldfront:allocation:{allocation.pk}"
     assert ticket.kind == FiledTicket.Kind.ALLOCATION
+    assert ticket.table == "incident"
     assert ticket.allocation == allocation
     assert ticket.resolved_at is None
 
@@ -156,7 +157,10 @@ def test_one_resolved_by_someone_else_is_recorded_unstamped(pi, snow):
     tasks.create_allocation_ticket(allocation.pk)
     FiledTicket.objects.all().delete()
     [(incident, fields)] = snow.incidents.values()
-    snow.incidents[f"coldfront:allocation:{allocation.pk}"] = (Incident(incident.sys_id, incident.number, "6"), fields)
+    snow.incidents[f"coldfront:allocation:{allocation.pk}"] = (
+        IncidentRef(incident.sys_id, incident.number, "6"),
+        fields,
+    )
 
     tasks.resolve_allocation_ticket(allocation.pk)
 

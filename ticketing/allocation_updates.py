@@ -31,7 +31,12 @@ from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.text import capfirst, slugify
 
-from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, clean_short_description
+from ticketing.tickets import (
+    DEFAULT_BUSINESS_SERVICE,
+    U_ACTION_ACTIVATE,
+    U_ACTION_MOVE_ADD_CHANGE,
+    clean_short_description,
+)
 
 # The one supported update today. Matches the storage plugin's QUOTA_ATTRIBUTE_NAME default.
 QUOTA_ATTRIBUTE_NAME = "Storage Quota (TB)"
@@ -39,7 +44,7 @@ QUOTA_UNITS = "TB"
 PATH_ATTRIBUTE_NAME = "Storage Path"
 
 
-# ServiceNow business service per resource type; types not listed keep the Ticket default (HPC).
+# ServiceNow business service per resource type; types not listed keep the ServiceNowIncident default (HPC).
 BUSINESS_SERVICE_BY_RESOURCE_TYPE = {
     "Storage": "Research Data Storage",
 }
@@ -156,6 +161,7 @@ class AllocationUpdate:
     comments: str  # customer-facing message
     close_notes: str
     business_service: str
+    u_action: str  # U_ACTION_ACTIVATE for something new, U_ACTION_MOVE_ADD_CHANGE for a change
 
 
 @dataclass(frozen=True)
@@ -163,6 +169,7 @@ class RequestDescription:
     short_description: str
     description: str  # admin-facing summary of what was asked for
     business_service: str
+    u_action: str  # as for AllocationUpdate
 
 
 def describe_new_allocation(allocation, requestor) -> RequestDescription:
@@ -189,6 +196,7 @@ def describe_new_allocation(allocation, requestor) -> RequestDescription:
         short_description=clean_short_description(f"{resource_label(allocation, resource)}: {summary}"),
         description=render_to_string("ticketing/allocation_request.txt", context),
         business_service=_business_service(resource),
+        u_action=U_ACTION_ACTIVATE,
     )
 
 
@@ -243,6 +251,7 @@ def describe_request(change, requestor) -> RequestDescription:
         short_description=clean_short_description(f"{resource_label(allocation, resource)}: {summary}"),
         description=render_to_string("ticketing/allocation_change_request.txt", context),
         business_service=_business_service(resource),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
 
 
@@ -306,6 +315,7 @@ def _storage(change, resource) -> AllocationUpdate:
         comments=_render("allocation_update", resource, context),
         close_notes="Quota updated.",
         business_service=_business_service(resource),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
 
 
@@ -327,6 +337,7 @@ def _storage_activation(allocation, resource) -> AllocationUpdate:
         comments=_render("allocation_new", resource, context),
         close_notes="Allocation activated.",
         business_service=_business_service(resource),
+        u_action=U_ACTION_ACTIVATE,
     )
 
 
@@ -342,6 +353,7 @@ def _generic_activation(allocation, resource) -> AllocationUpdate:
         comments=_render("allocation_new", resource, context),
         close_notes="Allocation activated.",
         business_service=_business_service(resource),
+        u_action=U_ACTION_ACTIVATE,
     )
 
 
@@ -367,4 +379,5 @@ def _generic_change(change, resource) -> AllocationUpdate:
         comments=_render("allocation_change", resource, context),
         close_notes="Allocation change applied.",
         business_service=_business_service(resource),
+        u_action=U_ACTION_MOVE_ADD_CHANGE,
     )

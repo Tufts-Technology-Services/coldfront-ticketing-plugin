@@ -2,7 +2,7 @@ import pytest
 from coldfront.core.test_helpers import factories as f
 
 from ticketing import tasks
-from ticketing.client import Incident
+from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import (
     FakeServiceNow,
@@ -11,7 +11,7 @@ from ticketing.tests.test_allocation_updates import (
     set_status,
     submitted_by,
 )
-from ticketing.tickets import Ticket
+from ticketing.tickets import ServiceNowIncident
 
 pytestmark = pytest.mark.django_db
 
@@ -32,7 +32,9 @@ def activated(in_request, requestor, admin, pi):
 
 def open_request_ticket(snow, correlation_id):
     return snow.create_incident(
-        Ticket(u_contact_person="jdoe01", caller_id="jdoe01", short_description="x", correlation_id=correlation_id)
+        ServiceNowIncident(
+            u_contact_person="jdoe01", caller_id="jdoe01", short_description="x", correlation_id=correlation_id
+        )
     )
 
 
@@ -53,6 +55,7 @@ def test_a_failed_share_files_an_admin_only_child_of_the_request(pi, requestor, 
     assert ticket["assigned_to"] is None  # waits in the group queue
     assert ticket["comments"] is None  # nothing customer-visible
     assert ticket["contact_type"] == "monitoring"
+    assert ticket["u_action"] == "Activate/Setup/Install"  # as for the request: a new share
     assert ticket["short_description"].startswith("Research Storage: Storage Job Failed | ")
     assert "State:        failed: missing information" in ticket["description"]
     assert f"Request:      {request.number}" in ticket["description"]
@@ -145,7 +148,7 @@ def test_a_closed_failure_ticket_is_left_alone(pi, requestor, admin, in_request,
     allocation = activated(in_request, requestor, admin, pi)
     filed = tasks.file_storage_failure_ticket(allocation.pk)
     cid = f"coldfront:allocation:{allocation.pk}:storage-failed"
-    snow.incidents[cid] = (Incident(filed.sys_id, filed.number, "7"), snow.incidents[cid][1])
+    snow.incidents[cid] = (IncidentRef(filed.sys_id, filed.number, "7"), snow.incidents[cid][1])
 
     tasks.file_storage_failure_ticket(allocation.pk)
 

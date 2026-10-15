@@ -15,8 +15,8 @@ allocation lifecycles have been trial-run on a development instance. Requests op
 submitted (unless a ticketing admin submitted them); the storage plugin's success resolves it. See
 `docs/plan.md` for the status of each piece and what is still open.
 
-`ticketing/tickets.py` holds the `Ticket` dataclass and `to_payload`, which turns it into the
-Table API body, resolving UTLNs and group names to sys_ids.
+`ticketing/tickets.py` holds the `ServiceNowIncident` dataclass and `to_payload`, which turns it
+into the Table API body, resolving UTLNs and group names to sys_ids.
 
 `tickets.py` has no Django or ColdFront imports, so its tests run standalone:
 
