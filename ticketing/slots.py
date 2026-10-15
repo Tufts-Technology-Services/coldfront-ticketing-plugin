@@ -28,7 +28,7 @@ class TicketSlot:
     (client.IncidentRef) or the local record of it (models.FiledTicket).
 
     Only incidents are filed today, so `table` is always "incident"; see "Requests instead of
-    incidents?" in docs/plan.md for what other tables would take.
+    incidents" in docs/design.md for what other tables would take.
     """
 
     correlation_id: str

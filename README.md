@@ -13,7 +13,7 @@ approved work done.
 tasks (`tasks/`) and the signal receivers (`signals.py`) are written and tested, and the
 allocation lifecycles have been trial-run on a development instance. Requests open a ticket when
 submitted (unless a ticketing admin submitted them); the storage plugin's success resolves it. See
-`docs/plan.md` for the status of each piece and what is still open.
+`docs/design.md` for how it works and why.
 
 `ticketing/tickets.py` holds the `ServiceNowIncident` dataclass and `to_payload`, which turns it
 into the Table API body, resolving UTLNs and group names to sys_ids.
@@ -54,14 +54,14 @@ failure leaves the incident open, and files a child ticket with only the approvi
 no customer is emailed; it says what failed and how to run the job again. The resolve runs in the
 storage plugin's task, where the approving admin's switch isn't visible, so approving with the
 switch off leaves a private `ticketing_suppressed` marker on the allocation and that request's
-resolve is skipped. See "Triggers" in `docs/plan.md`.
+resolve is skipped. See "Triggers" in `docs/design.md`.
 
 **Everything else resolves on approval:** allocations on non-Storage resources, and Storage change
 requests with no quota change (an end-date extension, say). The storage plugin does nothing for
 them, so there's no outcome to wait for. They get a generic message: `allocation_new/generic.txt`
 or `allocation_change/generic.txt`, unless a template named after the resource or its type exists.
 Which way a request goes copies the storage plugin's own rule (`storage_will_provision`); see
-"Requests the storage plugin doesn't finish" in `docs/plan.md`.
+"What the storage plugin doesn't provision" in `docs/design.md`.
 
 **Project user notices are once per calendar day, by design.** The first add or remove on a project
 files a generic, already-resolved notice ("the users on your project have changed"). Every later
@@ -72,11 +72,11 @@ add, so the PI and Approvers aren't told about it. The next day's first change f
 `project_activate_user` for the new project's PI, so without this every new project would get a
 notice that its users had changed. A PI isn't otherwise added to or removed from a project.
 Ticketing admins (see "Ticketing admins" below) are skipped too: they aren't project members
-to notify. See "Project user tickets" in `docs/plan.md`.
+to notify. See "Project user notices" in `docs/design.md`.
 
 Denials send no signal; their incidents stay open for admins to handle manually. Allocation renewals
 and account upgrade requests are unused at Tufts and out of scope. See "Out of scope" in
-`docs/plan.md`.
+`docs/design.md`.
 
 ## Requires a companion ColdFront change
 
@@ -84,7 +84,7 @@ All these signals already exist in ColdFront. A companion PR to the ColdFront fo
 `requestor_pk` kwarg to the two request signals (until then the receivers take the submitter from
 the current request, which works only while the signal is sent from a view) and
 the `EMAIL_TICKET_SYSTEM_NOTIFICATIONS_ENABLED` gate that switches off ColdFront's own ticket-queue
-emails. See "Part A" in `docs/plan.md`.
+emails. See "Companion ColdFront change" in `docs/design.md`.
 
 ## Install
 
@@ -190,7 +190,7 @@ Ticketing admins can see them in two places:
   Requests submitted by ticketing admins open no ticket, since one would email
   the PI and Approvers before the customer's ServiceNow ticket could be linked. They're still
   resolved, assigned to the admin who approved them. See "Linking tickets filed in ServiceNow" in
-  `docs/plan.md`.
+  `docs/design.md`.
 
 Links are built from `SERVICENOW_URL` when shown, so they follow the instance the site is configured
 for. Records survive deleting what they're about (the link is cleared, the `correlation_id` stays).
@@ -222,7 +222,6 @@ ticketing/
   templates/ticketing/   Django templates for incident description and resolution text
   tests/        settings.py layers on coldfront's real settings; conftest.py fixtures
 docs/
-  plan.md           full design, rationale, and open questions
+  design.md         how it works and why
   email_usage.md    inventory of ColdFront's existing email behavior
-  reference/        verbatim rt-ticket-utils source the vendored code derives from
 ```

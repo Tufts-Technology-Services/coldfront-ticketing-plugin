@@ -13,7 +13,8 @@
     file_storage_failure_ticket       either state = failed...             <request's>:storage-failed
     resolve_storage_failure_ticket    either state = success, after one    <request's>:storage-failed
 
-    * not triggered yet (see docs/plan.md); the rest are wired up in ticketing.signals.
+    * not triggered yet (see "Not yet wired up" in docs/design.md); the rest are wired up in
+      ticketing.signals.
 
 Each task is defined in the module for its kind of ticket, and re-exported here: the signals queue
 them by these names ("ticketing.tasks.create_allocation_ticket"), so the names stay put.

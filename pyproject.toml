@@ -52,8 +52,6 @@ packages = ["ticketing"]
 line-length = 120
 indent-width = 4
 target-version = "py312"
-# docs/reference holds verbatim upstream copies; reformatting them would defeat the point.
-extend-exclude = ["docs/reference"]
 
 [tool.ruff.lint]
 select = [

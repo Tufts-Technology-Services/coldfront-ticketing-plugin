@@ -18,7 +18,7 @@ def contact_type_for(user, project) -> str:
 
     Only superusers and a project's Managers pass the request views' permission checks, so "else"
     means an administrator acting on someone's behalf. Membership is tested directly because
-    project.has_perm() is True for every superuser. See "Choosing contact_type" in docs/plan.md.
+    project.has_perm() is True for every superuser. See "Who is on a ticket" in docs/design.md.
     """
     if project.pi_id == user.pk:
         return CONTACT_TYPE_SELF_SERVICE
