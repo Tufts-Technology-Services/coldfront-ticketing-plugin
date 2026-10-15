@@ -37,9 +37,9 @@ def snow(monkeypatch):
     return client
 
 
-def file(correlation_id, kind=FiledTicket.Kind.ALLOCATION, **subjects):
+def file_ticket(correlation_id, kind=FiledTicket.Kind.ALLOCATION, number="INC0000009", **subjects):
     return FiledTicket.objects.create(
-        correlation_id=correlation_id, kind=kind, number="INC0000009", sys_id="abc123", **subjects
+        correlation_id=correlation_id, kind=kind, number=number, sys_id="abc123", **subjects
     )
 
 
@@ -56,9 +56,9 @@ def test_url_points_at_the_configured_instance():
 def test_an_allocations_tickets_include_its_change_requests(pi):
     change = make_storage_change(pi)
     allocation = change.allocation
-    request = file("coldfront:allocation:1", allocation=allocation)
-    changed = file("coldfront:allocation-change:1", FiledTicket.Kind.ALLOCATION_CHANGE, allocation=allocation)
-    file("coldfront:allocation:2", allocation=make_storage_allocation(pi)[0])
+    request = file_ticket("coldfront:allocation:1", allocation=allocation)
+    changed = file_ticket("coldfront:allocation-change:1", FiledTicket.Kind.ALLOCATION_CHANGE, allocation=allocation)
+    file_ticket("coldfront:allocation:2", allocation=make_storage_allocation(pi)[0])
 
     assert set(FiledTicket.objects.about(allocation)) == {request, changed}
 
@@ -66,15 +66,15 @@ def test_an_allocations_tickets_include_its_change_requests(pi):
 def test_a_projects_tickets_include_its_allocations(pi):
     allocation, _ = make_storage_allocation(pi)
     project = allocation.project
-    users = file("coldfront:project-users:1:2026-09-28", FiledTicket.Kind.PROJECT_USERS, project=project)
-    request = file("coldfront:allocation:1", allocation=allocation)
-    file("coldfront:project-users:2:2026-09-28", FiledTicket.Kind.PROJECT_USERS, project=f.ProjectFactory(pi=pi))
+    users = file_ticket("coldfront:project-users:1:2026-09-28", FiledTicket.Kind.PROJECT_USERS, project=project)
+    request = file_ticket("coldfront:allocation:1", allocation=allocation)
+    file_ticket("coldfront:project-users:2:2026-09-28", FiledTicket.Kind.PROJECT_USERS, project=f.ProjectFactory(pi=pi))
 
     assert set(FiledTicket.objects.about(project)) == {users, request}
 
 
 def test_a_users_tickets_are_their_hpc_account(requestor):
-    account = file("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
+    account = file_ticket("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
 
     assert list(FiledTicket.objects.about(requestor)) == [account]
 
@@ -85,7 +85,7 @@ def test_tickets_about_anything_else_is_an_error():
 
 
 def test_deleting_the_subject_keeps_the_record(requestor):
-    file("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
+    file_ticket("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
 
     requestor.delete()
 
@@ -215,20 +215,21 @@ def test_failing_to_record_doesnt_fail_the_task(pi, snow, monkeypatch, caplog):
 
 # -- Showing them --------------------------------------------------------------------------------
 
-CARD = Template("{% include 'ticketing/filed_tickets.html' with subject=allocation %}")
+CARD = Template("{% include 'ticketing/filed_tickets.html' with subject=subject %}")
 
 
-def render_card(user, allocation):
-    request = RequestFactory().get("/")
+def render_card(user, subject, path="/"):
+    """The ticket card for `subject` (an allocation or project), as `user` sees it on `path`."""
+    request = RequestFactory().get(path)
     request.user = user
-    return CARD.render(Context({"request": request, "allocation": allocation}))
+    return CARD.render(Context({"request": request, "subject": subject}))
 
 
 @override_settings(SERVICENOW_URL=SNOW)
 @pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
 def test_ticketing_admins_see_linked_tickets(pi, request, who):
     allocation, _ = make_storage_allocation(pi)
-    file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
 
     html = render_card(request.getfixturevalue(who), allocation)
 
@@ -240,24 +241,15 @@ def test_ticketing_admins_see_linked_tickets(pi, request, who):
 
 def test_others_see_nothing(pi):
     allocation, _ = make_storage_allocation(pi)
-    file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
 
     assert render_card(pi, allocation).strip() == ""
-
-
-PROJECT_CARD = Template("{% include 'ticketing/filed_tickets.html' with subject=project %}")
-
-
-def render_project_card(user, project):
-    request = RequestFactory().get("/")
-    request.user = user
-    return PROJECT_CARD.render(Context({"request": request, "project": project}))
 
 
 @override_settings(SERVICENOW_URL=SNOW)
 def test_each_ticket_names_and_links_what_its_for(pi, admin):
     allocation, _ = make_storage_allocation(pi, resource_name="RStore")
-    file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
 
     html = render_card(admin, allocation)
 
@@ -270,16 +262,10 @@ def test_a_project_card_tells_its_allocations_apart(pi, admin):
     second, _ = make_storage_allocation(pi, resource_name="RStore")
     second.project = first.project
     second.save()
-    file(f"coldfront:allocation:{first.pk}", allocation=first)
-    FiledTicket.objects.create(
-        correlation_id=f"coldfront:allocation:{second.pk}",
-        kind=FiledTicket.Kind.ALLOCATION,
-        number="INC0000010",
-        sys_id="def456",
-        allocation=second,
-    )
+    file_ticket(f"coldfront:allocation:{first.pk}", allocation=first)
+    file_ticket(f"coldfront:allocation:{second.pk}", number="INC0000010", allocation=second)
 
-    html = render_project_card(admin, first.project)
+    html = render_card(admin, first.project)
 
     assert "Research Storage allocation (Active, " in html
     assert "RStore allocation (Active, " in html
@@ -290,12 +276,11 @@ def test_a_project_card_tells_its_allocations_apart(pi, admin):
 def test_a_storage_failure_shows_the_ticket_its_a_child_of(pi, admin):
     change = make_storage_change(pi)
     cid = f"coldfront:allocation-change:{change.pk}"
-    file(cid, FiledTicket.Kind.ALLOCATION_CHANGE, allocation_change=change, allocation=change.allocation)
-    FiledTicket.objects.create(
-        correlation_id=f"{cid}:storage-failed",
-        kind=FiledTicket.Kind.STORAGE_FAILURE,
+    file_ticket(cid, FiledTicket.Kind.ALLOCATION_CHANGE, allocation_change=change, allocation=change.allocation)
+    file_ticket(
+        f"{cid}:storage-failed",
+        FiledTicket.Kind.STORAGE_FAILURE,
         number="INC0000010",
-        sys_id="def456",
         allocation_change=change,
         allocation=change.allocation,
     )
@@ -309,7 +294,7 @@ def test_a_storage_failure_shows_the_ticket_its_a_child_of(pi, admin):
 @override_settings(SERVICENOW_URL=SNOW)
 def test_a_storage_failure_without_a_request_ticket_says_so(pi, admin):
     allocation, _ = make_storage_allocation(pi)
-    file(
+    file_ticket(
         f"coldfront:allocation:{allocation.pk}:storage-failed", FiledTicket.Kind.STORAGE_FAILURE, allocation=allocation
     )
 
@@ -319,15 +304,15 @@ def test_a_storage_failure_without_a_request_ticket_says_so(pi, admin):
 @override_settings(SERVICENOW_URL=SNOW)
 def test_a_project_user_notice_shows_its_day(pi, admin):
     project = f.ProjectFactory(pi=pi, title="Genomics Lab")
-    file(f"coldfront:project-users:{project.pk}:2026-10-10", FiledTicket.Kind.PROJECT_USERS, project=project)
+    file_ticket(f"coldfront:project-users:{project.pk}:2026-10-10", FiledTicket.Kind.PROJECT_USERS, project=project)
 
-    assert "Genomics Lab, 2026-10-10" in render_project_card(admin, project)
+    assert "Genomics Lab, 2026-10-10" in render_card(admin, project)
 
 
 @override_settings(SERVICENOW_URL=SNOW)
 def test_linked_tickets_are_marked_with_who_and_when(pi, admin):
     allocation, _ = make_storage_allocation(pi)
-    ticket = file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    ticket = file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
     ticket.source, ticket.linked_by = FiledTicket.Source.LINKED, admin
     ticket.linked_at = timezone.make_aware(datetime.datetime(2026, 10, 14, 9, 30))
     ticket.save()
@@ -340,7 +325,7 @@ def test_linked_tickets_are_marked_with_who_and_when(pi, admin):
 @override_settings(SERVICENOW_URL=SNOW)
 def test_a_link_with_no_time_recorded_shows_without_one(pi, admin):
     allocation, _ = make_storage_allocation(pi)
-    ticket = file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
+    ticket = file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
     ticket.source, ticket.linked_by = FiledTicket.Source.LINKED, admin
     ticket.save()
 
@@ -349,7 +334,7 @@ def test_a_link_with_no_time_recorded_shows_without_one(pi, admin):
 
 @override_settings(SERVICENOW_URL=SNOW)
 def test_admin_lists_them_read_only(client, admin, requestor):
-    file("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
+    file_ticket("coldfront:hpc-account:jdoe01", FiledTicket.Kind.HPC_ACCOUNT, user=requestor)
     client.force_login(admin)
 
     listing = client.get(reverse("admin:ticketing_filedticket_changelist"))

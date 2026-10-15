@@ -18,7 +18,7 @@ class TicketRow:
     ticket: FiledTicket
     about: str  # e.g. "Research Storage allocation (New, 2026-10-14)"
     about_url: str | None  # the page for what it's about, if ColdFront has one
-    parent: FiledTicket | None = None  # a storage failure's request ticket, if there is one
+    parent: FiledTicket | None  # a storage failure's request ticket, if there is one
 
 
 def _is_ticketing_admin(context):
@@ -36,17 +36,13 @@ def filed_tickets_for(context, subject):
             "allocation__status", "allocation_change__status", "project", "user", "linked_by"
         )
     )
-    request_ids = [
-        t.correlation_id.removesuffix(STORAGE_FAILURE_SUFFIX)
-        for t in tickets
-        if t.kind == FiledTicket.Kind.STORAGE_FAILURE
-    ]
-    parents = {t.correlation_id: t for t in FiledTicket.objects.filter(correlation_id__in=request_ids)}
+    # A storage failure's request ticket has the same subjects, so it's among these already.
+    by_correlation_id = {t.correlation_id: t for t in tickets}
     resources = {}  # allocation pk -> parent resource, so each is looked up once
-    return [_row(ticket, parents, resources) for ticket in tickets]
+    return [_row(ticket, by_correlation_id, resources) for ticket in tickets]
 
 
-def _row(ticket, parents, resources) -> TicketRow:
+def _row(ticket, by_correlation_id, resources) -> TicketRow:
     def about_allocation(allocation):
         if allocation.pk not in resources:
             resources[allocation.pk] = allocation.get_parent_resource
@@ -54,24 +50,23 @@ def _row(ticket, parents, resources) -> TicketRow:
 
     parent = None
     if ticket.kind == FiledTicket.Kind.STORAGE_FAILURE:
-        parent = parents.get(ticket.correlation_id.removesuffix(STORAGE_FAILURE_SUFFIX))
+        parent = by_correlation_id.get(ticket.correlation_id.removesuffix(STORAGE_FAILURE_SUFFIX))
     if ticket.allocation_change:
-        change = ticket.allocation_change
-        about = change_label(change)
+        about = change_label(ticket.allocation_change)
         if ticket.allocation:
             about += f" to {about_allocation(ticket.allocation)}"
-        return TicketRow(ticket, about, reverse("allocation-change-detail", kwargs={"pk": change.pk}), parent)
-    if ticket.allocation:
-        url = reverse("allocation-detail", kwargs={"pk": ticket.allocation.pk})
-        return TicketRow(ticket, about_allocation(ticket.allocation), url, parent)
-    if ticket.project:
+        url = ticket.allocation_change.get_absolute_url()
+    elif ticket.allocation:
+        about, url = about_allocation(ticket.allocation), ticket.allocation.get_absolute_url()
+    elif ticket.project:
         # A project user notice's correlation_id ends with the day it covers.
         day = ticket.correlation_id.rsplit(":", 1)[-1]
-        url = reverse("project-detail", kwargs={"pk": ticket.project.pk})
-        return TicketRow(ticket, f"{ticket.project.title}, {day}", url)
-    if ticket.user:
-        return TicketRow(ticket, ticket.user.username, None)
-    return TicketRow(ticket, "(deleted from ColdFront)", None, parent)
+        about, url = f"{ticket.project.title}, {day}", ticket.project.get_absolute_url()
+    elif ticket.user:
+        about, url = ticket.user.username, None
+    else:
+        about, url = "(deleted from ColdFront)", None
+    return TicketRow(ticket, about, url, parent)
 
 
 @register.simple_tag(takes_context=True)

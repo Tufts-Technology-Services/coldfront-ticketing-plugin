@@ -11,6 +11,7 @@ from ticketing import linking, tasks
 from ticketing.client import Incident, ServiceNowError
 from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import make_storage_allocation, make_storage_change
+from ticketing.tests.test_filed_tickets import render_card
 
 pytestmark = pytest.mark.django_db
 
@@ -581,25 +582,19 @@ def test_unlinking_is_ticketing_admins_only(pi, admin, client, snow):
     assert FiledTicket.objects.exists()
 
 
-def render_allocation_card(user, allocation):
-    request = RequestFactory().get(f"/allocation/{allocation.pk}/")
-    request.user = user
-    return Template("{% include 'ticketing/filed_tickets.html' with subject=allocation %}").render(
-        Context({"request": request, "allocation": allocation})
-    )
-
-
 @override_settings(SERVICENOW_URL="https://servicenow.invalid")
 def test_the_card_offers_unlink_until_coldfront_resolves_it(pi, admin, snow):
     allocation, _ = make_storage_allocation(pi)
     _, filed = linked(snow, admin, allocation)
 
-    assert f'action="{unlink_url(filed)}"' in render_allocation_card(admin, allocation)
-    assert f'name="next" value="/allocation/{allocation.pk}/"' in render_allocation_card(admin, allocation)
+    assert f'action="{unlink_url(filed)}"' in render_card(admin, allocation, f"/allocation/{allocation.pk}/")
+    assert f'name="next" value="/allocation/{allocation.pk}/"' in render_card(
+        admin, allocation, f"/allocation/{allocation.pk}/"
+    )
 
     tasks.resolve_allocation_ticket(allocation.pk)
 
-    assert f'action="{unlink_url(filed)}"' not in render_allocation_card(admin, allocation)
+    assert f'action="{unlink_url(filed)}"' not in render_card(admin, allocation, f"/allocation/{allocation.pk}/")
 
 
 @override_settings(SERVICENOW_URL="https://servicenow.invalid")
@@ -607,4 +602,6 @@ def test_the_card_offers_no_unlink_for_coldfronts_own_tickets(pi, admin, snow):
     allocation, _ = make_storage_allocation(pi)
     tasks.create_allocation_ticket(allocation.pk)
 
-    assert 'name="next"' not in render_allocation_card(admin, allocation)  # the unlink form's field
+    assert 'name="next"' not in render_card(
+        admin, allocation, f"/allocation/{allocation.pk}/"
+    )  # the unlink form's field

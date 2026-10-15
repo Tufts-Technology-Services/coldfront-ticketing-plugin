@@ -7,17 +7,23 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 
 from ticketing import toggle
 from ticketing.client import ServiceNowError
-from ticketing.linking import PROJECT_GROUP, LinkError, link_targets, link_ticket, unlink_ticket
+from ticketing.linking import LinkError, link_targets, link_ticket, unlink_ticket
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
 
 logger = logging.getLogger(__name__)
+
+SERVICENOW_FAILED = "ServiceNow couldn't be reached or refused the change. Try again."
+
+
+def same_site(request, url):
+    """`url` if it's safe to redirect to (on this site), else None."""
+    return url if url and url_has_allowed_host_and_scheme(url, {request.get_host()}, request.is_secure()) else None
 
 
 class TicketingToggleView(LoginRequiredMixin, UserPassesTestMixin, View):
@@ -42,10 +48,7 @@ class TicketingToggleView(LoginRequiredMixin, UserPassesTestMixin, View):
 
         if request.headers.get("HX-Request") == "true":
             return render(request, "ticketing/navbar_toggle.html", {"ticketing_toggle": toggle.state(request)})
-        back = request.headers.get("Referer")
-        if back and url_has_allowed_host_and_scheme(back, {request.get_host()}, request.is_secure()):
-            return redirect(back)
-        return redirect("home")
+        return redirect(same_site(request, request.headers.get("Referer")) or "home")
 
 
 class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
@@ -54,10 +57,7 @@ class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
     Posted from the ticket card's form; the outcome is shown as a message on the page it came from.
     """
 
-    SUBJECTS = {
-        "allocation": (Allocation, "allocation-detail"),
-        "project": (Project, "project-detail"),
-    }
+    SUBJECTS = {"allocation": Allocation, "project": Project}
 
     def test_func(self):
         return is_ticketing_admin(self.request.user)
@@ -65,9 +65,8 @@ class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
     def post(self, request, subject_type, pk):
         if subject_type not in self.SUBJECTS:
             raise Http404(f"No tickets are linked to a {subject_type}")
-        model, detail = self.SUBJECTS[subject_type]
-        subject = get_object_or_404(model, pk=pk)
-        back = redirect(reverse(detail, kwargs={"pk": subject.pk}))
+        subject = get_object_or_404(self.SUBJECTS[subject_type], pk=pk)
+        back = redirect(subject)
 
         targets = {target.correlation_id: target for target in link_targets(subject)}
         target = targets.get(request.POST.get("target", ""))
@@ -82,12 +81,10 @@ class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
             return back
         except (ServiceNowError, requests.RequestException):
             logger.exception("Linking %r to %s failed", number, target.correlation_id)
-            messages.error(request, "Not linked: ServiceNow couldn't be reached or refused the change. Try again.")
+            messages.error(request, f"Not linked: {SERVICENOW_FAILED}")
             return back
 
-        # From a project page, say which allocation the request belongs to.
-        of = f" of the {target.group}" if target.group and target.group != PROJECT_GROUP else ""
-        message = f"Linked {linked.incident.number} to {target.label.lower()}{of}."
+        message = f"Linked {linked.incident.number} to {target.description}."
         if linked.duplicate:
             message += f" ColdFront's {linked.duplicate.number} was closed as a duplicate of it."
         messages.success(request, message)
@@ -105,30 +102,18 @@ class UnlinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
 
     def post(self, request, pk):
         filed = get_object_or_404(FiledTicket, pk=pk)
-        back = redirect(self._back(request, filed))
-        number = filed.number
+        back = redirect(same_site(request, request.POST.get("next")) or filed.allocation or filed.project or "home")
         try:
             unlink_ticket(filed, request.user)
         except LinkError as e:
             messages.error(request, f"Not unlinked: {e}")
         except (ServiceNowError, requests.RequestException):
-            logger.exception("Unlinking %s from %s failed", number, filed.correlation_id)
-            messages.error(request, "Not unlinked: ServiceNow couldn't be reached or refused the change. Try again.")
+            logger.exception("Unlinking %s from %s failed", filed.number, filed.correlation_id)
+            messages.error(request, f"Not unlinked: {SERVICENOW_FAILED}")
         else:
             messages.success(
                 request,
-                f"Unlinked {number}. ColdFront no longer treats it as this request's ticket; link another, "
+                f"Unlinked {filed.number}. ColdFront no longer treats it as this request's ticket; link another, "
                 "or ColdFront files its own when the request is resolved.",
             )
         return back
-
-    @staticmethod
-    def _back(request, filed):
-        back = request.POST.get("next", "")
-        if back and url_has_allowed_host_and_scheme(back, {request.get_host()}, request.is_secure()):
-            return back
-        if filed.allocation_id:
-            return reverse("allocation-detail", kwargs={"pk": filed.allocation_id})
-        if filed.project_id:
-            return reverse("project-detail", kwargs={"pk": filed.project_id})
-        return reverse("home")

@@ -24,16 +24,17 @@ from dataclasses import dataclass, field
 
 from coldfront.core.allocation.models import Allocation
 from coldfront.core.project.models import Project
-from coldfront.core.utils.common import import_from_settings
 from django.utils import timezone
 
+from ticketing.allocation_updates import resource_label
 from ticketing.client import Incident, client_from_settings
 from ticketing.models import FiledTicket
 from ticketing.tasks import (
+    DONE_STATES,
     STATE_CLOSED,
-    STATE_RESOLVED,
     allocation_correlation_id,
     change_correlation_id,
+    default_assignment,
     project_users_correlation_id,
 )
 
@@ -61,6 +62,12 @@ class LinkTarget:
     kind: str
     subjects: dict = field(compare=False)
     group: str = field(default="", compare=False)  # an <optgroup> in the form; "" for none
+    of: str = field(default="", compare=False)  # its allocation, when offered on a project's page
+
+    @property
+    def description(self) -> str:
+        """The target in a sentence, e.g. "the allocation request of the RStore allocation (...)"."""
+        return self.label.lower() + (f" of the {self.of}" if self.of else "")
 
 
 @dataclass(frozen=True)
@@ -71,8 +78,7 @@ class Linked:
 
 def allocation_label(allocation, resource=None) -> str:
     """How an allocation is named on the ticket card: resource, status and when it was requested."""
-    resource = resource or allocation.get_parent_resource
-    name = resource.name if resource else f"Allocation {allocation.pk}"
+    name = resource_label(allocation, resource or allocation.get_parent_resource)
     return f"{name} allocation ({allocation.status.name}, {allocation.created:%Y-%m-%d})"
 
 
@@ -103,19 +109,22 @@ def link_targets(subject) -> list[LinkTarget]:
         ]
         allocations = subject.allocation_set.exclude(status__name__in=HIDDEN_FROM_PROJECT)
         for allocation in allocations.select_related("status").order_by("-created", "-pk"):
-            targets += _allocation_targets(allocation, group=allocation_label(allocation))
+            targets += _allocation_targets(allocation, of=allocation_label(allocation))
         return targets
     raise TypeError(f"Nothing to link a ticket to on a {type(subject).__name__}")
 
 
-def _allocation_targets(allocation, group="") -> list[LinkTarget]:
+def _allocation_targets(allocation, of="") -> list[LinkTarget]:
+    """The allocation's request and change requests; `of` names the allocation on a project's page,
+    where each allocation's targets are grouped under it."""
     targets = [
         LinkTarget(
             allocation_correlation_id(allocation.pk),
             "The allocation request",
             FiledTicket.Kind.ALLOCATION,
             {"allocation": allocation},
-            group=group,
+            group=of,
+            of=of,
         )
     ]
     for change in allocation.allocationchangerequest_set.select_related("status").order_by("-created", "-pk"):
@@ -125,7 +134,8 @@ def _allocation_targets(allocation, group="") -> list[LinkTarget]:
                 change_label(change),
                 FiledTicket.Kind.ALLOCATION_CHANGE,
                 {"allocation_change": change, "allocation": allocation},
-                group=group,
+                group=of,
+                of=of,
             )
         )
     return targets
@@ -143,24 +153,23 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
         raise LinkError(f"There's no incident {number} in ServiceNow")
     if incident.correlation_id and incident.correlation_id != target.correlation_id:
         raise LinkError(f"{number} is already linked to something else ({incident.correlation_id})")
-    if incident.correlation_id != target.correlation_id and incident.state in (STATE_RESOLVED, STATE_CLOSED):
+    if incident.correlation_id != target.correlation_id and incident.state in DONE_STATES:
         raise LinkError(f"{number} is already resolved, so ColdFront would have nothing to send to it")
 
     ours = client.find_incident(target.correlation_id)
     duplicate = None
     if ours and ours.sys_id != incident.sys_id:
-        if ours.state in (STATE_RESOLVED, STATE_CLOSED):
+        if ours.state in DONE_STATES:
             raise LinkError(
                 f"ColdFront's {ours.number} for this is already resolved. Close {number} in ServiceNow "
                 f"by hand, as a duplicate of {ours.number}."
             )
         # Clear its correlation_id first: if setting ours then fails, nothing shares one, and
         # linking again just sets it. Closed, like resolved, means assigned (see _resolve_or_file).
-        assignment = {} if ours.assigned_to else {"assigned_to": import_from_settings("TICKETING_ASSIGNED_TO")}
         client.update_incident(
             ours.sys_id,
             {
-                **assignment,
+                **default_assignment(ours),
                 "correlation_id": "",
                 "u_duplicate_of": incident.sys_id,
                 "state": STATE_CLOSED,
@@ -204,7 +213,7 @@ def unlink_ticket(filed: FiledTicket, unlinked_by) -> None:
     client = client_from_settings()
     incident = client.find_incident_by_number(filed.number)
     if incident is not None:
-        if incident.state in (STATE_RESOLVED, STATE_CLOSED):
+        if incident.state in DONE_STATES:
             raise LinkError(f"{filed.number} is already resolved in ServiceNow, so it can't be unlinked")
         # Leave the correlation_id alone if someone has since pointed it elsewhere.
         if incident.correlation_id == filed.correlation_id:

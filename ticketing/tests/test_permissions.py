@@ -7,7 +7,7 @@ from django.urls import reverse
 
 from ticketing.permissions import is_ticketing_admin
 from ticketing.tests.test_allocation_updates import make_storage_allocation
-from ticketing.tests.test_filed_tickets import file
+from ticketing.tests.test_filed_tickets import file_ticket
 
 pytestmark = pytest.mark.django_db
 
@@ -65,7 +65,7 @@ def test_is_staff_users_dont_get_the_switch(is_staff_user, client):
 def test_ticketing_admins_can_view_filed_tickets_in_django_admin(ticketing_admin, client):
     ticketing_admin.is_staff = True  # Django admin only lets in is_staff users
     ticketing_admin.save()
-    file("coldfront:allocation:1")
+    file_ticket("coldfront:allocation:1")
     client.force_login(ticketing_admin)
 
     assert client.get(reverse("admin:ticketing_filedticket_changelist")).status_code == 200
