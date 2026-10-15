@@ -39,6 +39,7 @@ settings).
 | Share created | `post_save`: `share_creation_state` = `success` | `AllocationAttribute` | Resolve the allocation's incident (assigned to the approver if a ticketing admin requested it) |
 | New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident, unless a ticketing admin submitted it |
 | Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
+| Storage job failed | `post_save`: either state = `failed...` | `AllocationAttribute` | File an admin-only child of the request's incident; a later success resolves it |
 | Allocation or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | Nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 
@@ -49,16 +50,16 @@ order of `INSTALLED_APPS`.
 **Requests resolve on storage success, not on approval.** The storage plugin creates shares and
 sets quotas in background tasks after approval, and records each outcome in an allocation
 attribute. Resolving on approval could tell the customer "done" before, or despite, a failure. A
-failure leaves the incident open for an admin. The resolve runs in the storage plugin's task, where
-the approving admin's switch isn't visible, so approving with the switch off leaves a private
-`ticketing_suppressed` marker on the allocation and that request's resolve is skipped. See
-"Triggers" in `docs/plan.md`.
+failure leaves the incident open, and files a child ticket with only the approving admin on it, so
+no customer is emailed; it says what failed and how to run the job again. The resolve runs in the
+storage plugin's task, where the approving admin's switch isn't visible, so approving with the
+switch off leaves a private `ticketing_suppressed` marker on the allocation and that request's
+resolve is skipped. See "Triggers" in `docs/plan.md`.
 
-**Not yet resolved automatically:** allocations on non-Storage resources, Storage change requests
-with no quota change (an end-date extension, say), and failed storage jobs. Their incidents stay
-open for an admin; a ticketing admin's request in this group files nothing. Resolving them on
-approval, and filing an admin-only ticket when a storage job fails, is planned. See "Requests the
-storage plugin doesn't finish" in `docs/plan.md`.
+**Not yet resolved automatically:** allocations on non-Storage resources, and Storage change
+requests with no quota change (an end-date extension, say). Their incidents stay open for an admin;
+a ticketing admin's request in this group files nothing. Resolving them on approval is planned. See
+"Requests the storage plugin doesn't finish" in `docs/plan.md`.
 
 **Project user notices are once per calendar day, by design.** The first add or remove on a project
 files a generic, already-resolved notice ("the users on your project have changed"). Every later

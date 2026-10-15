@@ -1,0 +1,18 @@
+{% autoescape off %}A storage job failed after approval in ColdFront. The customer hasn't been told.
+
+Job:          {{ job }}
+State:        {{ state }}
+Project:      {{ project.title }}
+PI:           {{ pi.get_full_name|default:pi.username }} ({{ pi.username }})
+Resource:     {% if resource %}{{ resource.name }}{% else %}(none){% endif %}{% if path %}
+Path:         {{ path }}{% endif %}{% if quota %}
+Quota:        {{ quota }} TB{% endif %}
+Approved by:  {{ approver|default:"(not recorded)" }}
+Request:      {% if parent %}{{ parent.number }}{% else %}(no ticket: submitted by a ticketing admin, and none linked){% endif %}
+
+The storage plugin doesn't retry. Fix the cause, then run the job again: for a new share, set the
+allocation's status away from Active and back; for a quota change, edit the allocation's quota or
+approve a new change request. When the job succeeds, ColdFront resolves the request's ticket and
+this one.
+
+In ColdFront: {{ url }}{% endautoescape %}

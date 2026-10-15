@@ -7,18 +7,22 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     allocation_change_created (AllocationChangeView)       create_allocation_change_ticket
     share_creation_state saved as "success"                resolve_allocation_ticket
     quota_update_state saved as "success"                  resolve_allocation_change_ticket
+    either state saved as "failed..."                      file_storage_failure_ticket
+    either state saved as "success", after a failure       resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
-Requests open a ticket when they're submitted, unless a ticketing admin submitted them. They're resolved when
-the storage plugin reports its work done, not on approval (decided 2026-10-07): the plugin creates
-shares and sets quotas in background tasks after approval and records the outcome in those two
-allocation attributes, so resolving on approval could tell the customer "done" before -- or despite
--- a failure. A failure leaves the ticket open for an admin.
+Requests open a ticket when they're submitted, unless a ticketing admin submitted them. They're
+resolved when the storage plugin reports its work done, not on approval (decided 2026-10-07): the
+plugin creates shares and sets quotas in background tasks after approval and records the outcome in
+those two allocation attributes, so resolving on approval could tell the customer "done" before --
+or despite -- a failure. A failure leaves the request's ticket open, and files an admin-only child
+ticket for it, resolved by a later success.
 
 Approval (allocation_activate, allocation_change_approved) queues nothing, but it is the last moment
 the approving admin's request -- and so their ticketing switch -- is visible. If the switch is off,
 the approval leaves a `ticketing_suppressed` marker on the allocation, holding the request's
-correlation_id; the storage success that follows finds it, deletes it and resolves nothing.
+correlation_id; the storage success that follows finds it, deletes it and resolves nothing. A
+failure in between finds it too, leaves it, and files nothing.
 
 Each receiver hands off with ticketing.dispatch.enqueue_ticket, never async_task directly, and
 passes only pks so the task re-queries committed state. Denials, renewals and account upgrades are
@@ -51,8 +55,9 @@ from django.dispatch import receiver
 from ticketing import toggle
 from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME
 from ticketing.dispatch import enqueue_ticket
+from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
-from ticketing.tasks import allocation_correlation_id, change_correlation_id
+from ticketing.tasks import allocation_correlation_id, change_correlation_id, storage_failure_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,7 @@ logger = logging.getLogger(__name__)
 SHARE_STATE_ATTRIBUTE = import_from_settings("TICKETING_SHARE_STATE_ATTRIBUTE", "share_creation_state")
 QUOTA_STATE_ATTRIBUTE = import_from_settings("TICKETING_QUOTA_STATE_ATTRIBUTE", "quota_update_state")
 SUCCESS = "success"
+FAILED = "failed"  # the storage plugin writes "failed" or "failed: <reason>"
 # Private allocation attribute: "an admin approved this with ticketing off; don't resolve it".
 SUPPRESSED_ATTRIBUTE = "ticketing_suppressed"
 
@@ -168,37 +174,58 @@ def take_suppression(allocation_pk, correlation_id) -> bool:
     return bool(deleted)
 
 
+def is_suppressed(allocation_pk, correlation_id) -> bool:
+    """Whether the request has a suppression marker, leaving it for the success that uses it up."""
+    return AllocationAttribute.objects.filter(
+        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
+    ).exists()
+
+
 @receiver(post_save, sender=AllocationAttribute, dispatch_uid="ticketing-storage-state")
 def storage_state_saved(sender, instance, **kwargs):
-    """Resolve the request whose storage work just succeeded, unless its approver had ticketing off.
+    """Act on a storage job's outcome, unless its approver had ticketing off.
+
+    A success resolves the request, and the job's failure ticket if one is open. A failure (a value
+    starting "failed") files an admin-only failure ticket, a child of the request's.
 
     Fires on every allocation attribute save, so it bails on the value before touching the database.
-    The storage plugin only saves a state when it changes, so each success arrives once.
+    The storage plugin only saves a state when it changes, so each success arrives once, and a
+    failure once per attempt.
     """
-    if instance.value.strip() != SUCCESS:
+    value = instance.value.strip()
+    if value != SUCCESS and not value.startswith(FAILED):
         return
     name = instance.allocation_attribute_type.name
+    allocation_pk = instance.allocation_id
     if name == SHARE_STATE_ATTRIBUTE:
-        task, pk, correlation_id = (
-            "ticketing.tasks.resolve_allocation_ticket",
-            instance.allocation_id,
-            allocation_correlation_id(instance.allocation_id),
-        )
+        change_pk, correlation_id = None, allocation_correlation_id(allocation_pk)
     elif name == QUOTA_STATE_ATTRIBUTE:
-        change_pk = applied_quota_change_pk(instance.allocation_id)
+        change_pk = applied_quota_change_pk(allocation_pk)
         if change_pk is None:
-            logger.info("Quota set on allocation %s with no approved change request for it", instance.allocation_id)
+            logger.info("Quota set on allocation %s with no approved change request for it", allocation_pk)
             return
-        task, pk, correlation_id = (
-            "ticketing.tasks.resolve_allocation_change_ticket",
-            change_pk,
-            change_correlation_id(change_pk),
-        )
+        correlation_id = change_correlation_id(change_pk)
     else:
         return
-    if take_suppression(instance.allocation_id, correlation_id):
+
+    if value != SUCCESS:
+        if is_suppressed(allocation_pk, correlation_id):
+            logger.info("Not filing a storage failure for %s: approved with ticketing off", correlation_id)
+            return
+        enqueue_ticket("ticketing.tasks.file_storage_failure_ticket", allocation_pk, change_pk, state=value)
+        return
+
+    if take_suppression(allocation_pk, correlation_id):
         logger.info("Not resolving %s: approved with ticketing off", correlation_id)
         return
+    if FiledTicket.objects.filter(
+        correlation_id=storage_failure_correlation_id(correlation_id), resolved_at__isnull=True
+    ).exists():
+        enqueue_ticket("ticketing.tasks.resolve_storage_failure_ticket", allocation_pk, change_pk)
+    if change_pk is None:
+        task, pk = "ticketing.tasks.resolve_allocation_ticket", allocation_pk
+    else:
+        task, pk = "ticketing.tasks.resolve_allocation_change_ticket", change_pk
     enqueue_ticket(task, pk)
 
 

@@ -34,6 +34,8 @@ REFERENCE_FIELDS = {
     "watch_list": ("sys_user", "user_name"),
     "assignment_group": ("sys_user_group", "name"),
     "u_business_service": ("cmdb_ci_service", "name"),
+    # The ticket this is a child of. Tufts' incident table has no parent_incident (checked on the
+    # dev instance, 2026-10-15); parent, a reference to task, is the one there is.
     "parent": ("task", "number"),
 }
 

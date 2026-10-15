@@ -10,6 +10,8 @@
     resolve_allocation_ticket         share_creation_state = success       coldfront:allocation:<pk>
     create_allocation_change_ticket   allocation_change_created            coldfront:allocation-change:<pk>
     resolve_allocation_change_ticket  quota_update_state = success         coldfront:allocation-change:<pk>
+    file_storage_failure_ticket       either state = failed...             <request's>:storage-failed
+    resolve_storage_failure_ticket    either state = success, after one    <request's>:storage-failed
 
     * not triggered yet (see docs/plan.md); the rest are wired up in ticketing.signals.
 
@@ -29,6 +31,7 @@ open for an admin.
 """
 
 import logging
+from dataclasses import dataclass
 
 from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
 from coldfront.core.project.models import Project
@@ -40,6 +43,9 @@ from django.urls import reverse
 from django.utils import timezone
 
 from ticketing.allocation_updates import (
+    BUSINESS_SERVICE_BY_RESOURCE_TYPE,
+    PATH_ATTRIBUTE_NAME,
+    QUOTA_ATTRIBUTE_NAME,
     AllocationUpdate,
     RequestDescription,
     UnsupportedUpdate,
@@ -57,11 +63,13 @@ logger = logging.getLogger(__name__)
 
 # Choice values, checked against the instance's field metadata (/api/now/ui/meta/incident). An
 # invalid value is dropped without an error, so don't change these without re-checking.
+STATE_ACTIVE = "2"
 STATE_RESOLVED = "6"
 STATE_CLOSED = "7"
 CLOSE_CODE_SOLVED_REMOTELY = "Solved Remotely (Permanently)"
 CONTACT_TYPE_SELF_SERVICE = "self-service"
 CONTACT_TYPE_EMAIL = "email"
+CONTACT_TYPE_MONITORING = "monitoring"
 U_ACTION_MOVE_ADD_CHANGE = "Move/Add/Change"
 U_ACTION_ACTIVATE = "Activate/Setup/Install"
 
@@ -330,25 +338,45 @@ def _people_fields(project, requestor_pk, affected_pk=None):
     return requestor, fields
 
 
-def admin_request_approver(request, approved_status) -> str | None:
-    """The UTLN of whoever approved `request`, if a ticketing admin submitted it; else None.
+def request_approver(request, approved_status) -> str | None:
+    """The UTLN of whoever approved `request`, from its simple-history; None if unknown.
 
-    `request` is an Allocation or AllocationChangeRequest. Its simple-history rows record who made
-    each save (HistoryRequestMiddleware): the creation row names the submitter, and the latest row
-    where the status became `approved_status` the approver. Admins' requests open no ticket, and
-    their resolve is assigned to the approving admin rather than the integration account. None too
-    when a save happened outside a web request.
+    `request` is an Allocation or AllocationChangeRequest. Its history rows record who made each
+    save (HistoryRequestMiddleware); the approver made the latest save where the status became
+    `approved_status`. None when that save happened outside a web request.
     """
-    history = request.history.order_by("history_date", "history_id")
-    created = history.filter(history_type="+").select_related("history_user").first()
-    if created is None or not is_ticketing_admin(created.history_user):
-        return None
     approver = previous = None
-    for status, username in history.values_list("status__name", "history_user__username"):
+    for status, username in request.history.order_by("history_date", "history_id").values_list(
+        "status__name", "history_user__username"
+    ):
         if status == approved_status and previous != approved_status:
             approver = username
         previous = status
     return approver
+
+
+def admin_request_approver(request, approved_status) -> str | None:
+    """The approver's UTLN (request_approver) if a ticketing admin submitted `request`; else None.
+
+    The submitter is whoever made the request's creation save. Admins' requests open no ticket, and
+    their resolve is assigned to the approving admin rather than the integration account.
+    """
+    created = request.history.filter(history_type="+").select_related("history_user").first()
+    if created is None or not is_ticketing_admin(created.history_user):
+        return None
+    return request_approver(request, approved_status)
+
+
+def _known_user(client, utln, what) -> str:
+    """`utln` if ServiceNow has that user, else TICKETING_ASSIGNED_TO (logged). The lookup is cached,
+    so building the payload doesn't repeat it."""
+    service_account = import_from_settings("TICKETING_ASSIGNED_TO")
+    try:
+        client.sys_id_for(*REFERENCE_FIELDS["assigned_to"], utln)
+    except UnknownReference:
+        logger.warning("ServiceNow has no user %s; using %s for %s", utln, service_account, what)
+        return service_account
+    return utln
 
 
 def _filed(correlation_id) -> Incident | None:
@@ -448,11 +476,7 @@ def _resolve_or_file(
     service_account = import_from_settings("TICKETING_ASSIGNED_TO")
     chosen = assignee() if assignee else None
     if chosen:
-        try:
-            client.sys_id_for(*REFERENCE_FIELDS["assigned_to"], chosen)  # cached for the payload
-        except UnknownReference:
-            logger.warning("ServiceNow has no user %s; assigning %s to %s", chosen, what, service_account)
-            chosen = service_account
+        chosen = _known_user(client, chosen, what)
 
     if existing:
         assignment = {"assigned_to": chosen or service_account} if chosen or not existing.assigned_to else {}
@@ -576,8 +600,8 @@ def resolve_allocation_change_ticket(
     The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
     quota changes are supported today, and anything else is left open for an admin. With no
     incident to resolve, a new one is filed already resolved. `requestor_pk` and `affected_pk` only
-    matter then -- without them the PI is the caller. If a ticketing admin submitted the request, it is assigned
-    to the admin who approved it (admin_request_approver). Safe to re-run.
+    matter then -- without them the PI is the caller. If a ticketing admin submitted the request, it
+    is assigned to the admin who approved it (admin_request_approver). Safe to re-run.
     """
     change = _change(allocation_change_pk)
     return _resolve_or_file(
@@ -590,3 +614,156 @@ def resolve_allocation_change_ticket(
         u_action=U_ACTION_MOVE_ADD_CHANGE,
         assignee=lambda: admin_request_approver(change, "Approved"),
     )
+
+
+# -- Storage failures: an admin-only child of the request's ticket --------------------------------
+
+
+STORAGE_FAILURE_SUFFIX = ":storage-failed"
+
+
+def storage_failure_correlation_id(request_correlation_id) -> str:
+    return f"{request_correlation_id}{STORAGE_FAILURE_SUFFIX}"
+
+
+@dataclass(frozen=True)
+class _StorageJob:
+    """The request a storage job was for, and how to describe it."""
+
+    allocation: Allocation
+    request: Allocation | AllocationChangeRequest
+    approved_status: str
+    correlation_id: str  # the request's
+    what: str
+    job: str
+    url: str
+    subjects: dict
+    u_action: str
+
+
+def _storage_job(allocation_pk, allocation_change_pk) -> _StorageJob:
+    if allocation_change_pk:
+        change = _change(allocation_change_pk)
+        return _StorageJob(
+            allocation=change.allocation,
+            request=change,
+            approved_status="Approved",
+            correlation_id=change_correlation_id(change.pk),
+            what=f"allocation change {change.pk}",
+            job="Quota change",
+            url=build_link(reverse("allocation-change-detail", kwargs={"pk": change.pk})),
+            subjects={"allocation_change": change, "allocation": change.allocation},
+            u_action=U_ACTION_MOVE_ADD_CHANGE,
+        )
+    allocation = _allocation(allocation_pk)
+    return _StorageJob(
+        allocation=allocation,
+        request=allocation,
+        approved_status="Active",
+        correlation_id=allocation_correlation_id(allocation.pk),
+        what=f"allocation {allocation.pk}",
+        job="Share creation",
+        url=build_link(reverse("allocation-detail", kwargs={"pk": allocation.pk})),
+        subjects={"allocation": allocation},
+        u_action=U_ACTION_ACTIVATE,
+    )
+
+
+def file_storage_failure_ticket(
+    allocation_pk: int, allocation_change_pk: int | None = None, state: str = "failed"
+) -> Incident | None:
+    """Tell admins a storage job failed, in a ticket only admins are on.
+
+    `state` is the storage plugin's failed value (share_creation_state for an allocation,
+    quota_update_state for `allocation_change_pk`). The ticket is a child (parent) of the
+    request's incident -- ColdFront's own, or the customer's if an admin linked it -- or has no
+    parent when there is none, as for a ticketing admin's unlinked request. The approving admin is
+    caller and contact (TICKETING_ASSIGNED_TO if unknown), with no watch list, contact_type
+    monitoring, and no assignee, so it waits in the group queue. Its text is internal (description,
+    work_notes), so no customer is emailed.
+
+    One per request, by correlation_id "<request's correlation_id>:storage-failed". A repeat failure
+    adds a work note, reopening the ticket if it was resolved; a Closed one is left alone. A later
+    success resolves it (resolve_storage_failure_ticket). Safe to re-run, though a re-run of a
+    repeat adds its work note again.
+    """
+    job = _storage_job(allocation_pk, allocation_change_pk)
+    correlation_id = storage_failure_correlation_id(job.correlation_id)
+    what = f"the storage job for {job.what}"
+    client = client_from_settings()
+
+    existing = client.find_incident(correlation_id)
+    if existing:
+        if existing.state == STATE_CLOSED:
+            logger.warning("%s failed again (%s), but its ticket %s is closed", what, state, existing.number)
+            return existing
+        fields = {"work_notes": f"{job.job} failed again: {state}"}
+        if existing.state == STATE_RESOLVED:
+            fields["state"] = STATE_ACTIVE
+        client.update_incident(existing.sys_id, fields)
+        logger.info("Noted a repeat failure of %s on %s", what, existing.number)
+        _record(existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects)
+        FiledTicket.objects.filter(correlation_id=correlation_id).update(resolved_at=None)
+        return existing
+
+    parent = client.find_incident(job.correlation_id)
+    approver = request_approver(job.request, job.approved_status)
+    person = _known_user(client, approver, what) if approver else import_from_settings("TICKETING_ASSIGNED_TO")
+    allocation = job.allocation
+    resource = allocation.get_parent_resource
+    label = resource.name if resource else f"Allocation {allocation.pk}"
+    context = {
+        "job": job.job,
+        "state": state,
+        "allocation": allocation,
+        "project": allocation.project,
+        "pi": allocation.project.pi,
+        "resource": resource,
+        "path": allocation.get_attribute(PATH_ATTRIBUTE_NAME) or "",
+        "quota": allocation.get_attribute(QUOTA_ATTRIBUTE_NAME),
+        "parent": parent,
+        "approver": approver,
+        "url": job.url,
+    }
+    ticket = Ticket(
+        u_contact_person=person,
+        caller_id=person,
+        contact_type=CONTACT_TYPE_MONITORING,
+        short_description=clean_short_description(f"{label}: Storage Job Failed | {allocation.project.title}"),
+        description=render_to_string("ticketing/storage_failure.txt", context),
+        u_business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE["Storage"],
+        u_action=job.u_action,
+        parent=parent.number if parent else None,
+        correlation_id=correlation_id,
+    )
+    incident = client.create_incident(ticket)
+    logger.info("Filed %s for %s", incident.number, what)
+    _record(incident, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects)
+    return incident
+
+
+def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int | None = None) -> Incident | None:
+    """Resolve a storage job's failure ticket once the job has succeeded; no-op if there's none open.
+
+    Queued alongside the request's own resolve, only when a failure ticket is recorded and not yet
+    resolved (see ticketing.signals). Assigned to TICKETING_ASSIGNED_TO if no one picked it up.
+    """
+    job = _storage_job(allocation_pk, allocation_change_pk)
+    correlation_id = storage_failure_correlation_id(job.correlation_id)
+    client = client_from_settings()
+    existing = client.find_incident(correlation_id)
+    if existing is None or existing.state in (STATE_RESOLVED, STATE_CLOSED):
+        return existing
+    assignment = {} if existing.assigned_to else {"assigned_to": import_from_settings("TICKETING_ASSIGNED_TO")}
+    client.update_incident(
+        existing.sys_id,
+        {
+            **assignment,
+            "state": STATE_RESOLVED,
+            "close_code": CLOSE_CODE_SOLVED_REMOTELY,
+            "close_notes": f"{job.job} succeeded on a later attempt.",
+        },
+    )
+    logger.info("Resolved %s for the storage job for %s", existing.number, job.what)
+    _record(existing, correlation_id, FiledTicket.Kind.STORAGE_FAILURE, job.subjects, resolved=True)
+    return existing

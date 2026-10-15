@@ -14,6 +14,7 @@ from coldfront.core.allocation.views import (
 from coldfront.core.test_helpers import factories as f
 from simple_history.models import HistoricalRecords
 
+from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import (
     make_cluster_allocation,
     make_storage_allocation,
@@ -165,14 +166,53 @@ def test_share_created_resolves_the_allocation_ticket(pi, queued, committed):
     assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
 
-@pytest.mark.parametrize("value", ["pending", "failed: missing information"])
-def test_share_not_created_resolves_nothing(pi, queued, committed, value):
+def test_a_pending_share_queues_nothing(pi, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+
+    with committed():
+        set_state(allocation, "share_creation_state", "pending")
+
+    assert queued == []
+
+
+@pytest.mark.parametrize("value", ["failed", "failed: missing information"])
+def test_a_failed_share_files_a_failure_ticket(pi, queued, committed, value):
     allocation, _ = make_storage_allocation(pi)
 
     with committed():
         set_state(allocation, "share_creation_state", value)
 
-    assert queued == []
+    assert queued == [("ticketing.tasks.file_storage_failure_ticket", (allocation.pk, None), {"state": value})]
+
+
+def test_a_failed_quota_change_files_a_failure_ticket_for_its_request(pi, queued, committed):
+    change = approve(make_storage_change(pi, old="10", new="20"))
+
+    with committed():
+        set_state(change.allocation, "quota_update_state", "failed")
+
+    assert queued == [
+        ("ticketing.tasks.file_storage_failure_ticket", (change.allocation.pk, change.pk), {"state": "failed"})
+    ]
+
+
+def test_success_after_a_failure_ticket_resolves_both(pi, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    FiledTicket.objects.create(
+        correlation_id=f"coldfront:allocation:{allocation.pk}:storage-failed",
+        kind=FiledTicket.Kind.STORAGE_FAILURE,
+        number="INC0000002",
+        sys_id="i-2",
+        allocation=allocation,
+    )
+
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == [
+        ("ticketing.tasks.resolve_storage_failure_ticket", (allocation.pk, None), {}),
+        ("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {}),
+    ]
 
 
 def test_quota_set_resolves_the_change_request_that_asked_for_it(pi, queued, committed):
@@ -268,6 +308,22 @@ def test_share_created_after_an_approval_with_ticketing_off_resolves_nothing(pi,
 
     assert queued == []
     assert markers(allocation) == []  # used up
+
+
+def test_a_failure_after_an_approval_with_ticketing_off_files_nothing_and_keeps_the_marker(
+    pi, admin, in_request, queued, committed
+):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin, off=True)
+    allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+    del HistoricalRecords.context.request
+
+    with committed():
+        set_state(allocation, "share_creation_state", "failed")
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == []  # the marker outlived the failure, and suppressed the success too
 
 
 def test_quota_set_after_an_approval_with_ticketing_off_resolves_nothing(pi, admin, in_request, queued, committed):
