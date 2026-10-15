@@ -1,0 +1,12 @@
+{% autoescape off %}Hello,
+
+Your new allocation of {{ resource.name }} for project {{ project.title }} is now active.{% if allocation.end_date %}
+It runs until {{ allocation.end_date }}.{% endif %}{% if attributes %}
+
+Allocation details:
+{% for a in attributes %}- {{ a.name }}: {{ a.value }}
+{% endfor %}{% else %}
+{% endif %}
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

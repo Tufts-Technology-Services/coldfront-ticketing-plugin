@@ -12,9 +12,9 @@ from coldfront.core.allocation.views import (
     AllocationDetailView,
 )
 from coldfront.core.test_helpers import factories as f
-from django.contrib.auth import get_user_model
 from simple_history.models import HistoricalRecords
 
+from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import (
     make_cluster_allocation,
     make_storage_allocation,
@@ -88,6 +88,20 @@ def test_other_senders_are_ignored(pi, queued, committed):
     assert queued == []
 
 
+class ReplacedCreateView(AllocationCreateView):
+    """Like the storage plugin's view, which it swaps in for core's AllocationCreateView."""
+
+
+def test_a_view_a_plugin_replaced_still_opens_a_ticket(pi, requestor, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(requestor)
+
+    with committed():
+        allocation_new.send(sender=ReplacedCreateView, allocation_pk=allocation.pk)
+
+    assert queued == [("ticketing.tasks.create_allocation_ticket", (allocation.pk,), {"requestor_pk": requestor.pk})]
+
+
 def test_change_request_opens_a_ticket(pi, requestor, in_request, queued, committed):
     change = make_storage_change(pi)
     in_request(requestor)
@@ -100,14 +114,41 @@ def test_change_request_opens_a_ticket(pi, requestor, in_request, queued, commit
     assert queued == [("ticketing.tasks.create_allocation_change_ticket", (change.pk,), {"requestor_pk": requestor.pk})]
 
 
-def test_admin_with_ticketing_off_opens_nothing(pi, admin, in_request, queued, committed):
+@pytest.mark.parametrize("who", ["ticketing_admin", "admin"])
+def test_ticketing_admins_requests_open_nothing(pi, in_request, queued, committed, request, who):
     allocation, _ = make_storage_allocation(pi)
-    in_request(admin, off=True)
+    change = make_storage_change(pi)
+    in_request(request.getfixturevalue(who))
 
     with committed():
         allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk)
+        allocation_change_created.send(
+            sender=AllocationChangeView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
 
     assert queued == []
+
+
+def test_an_admin_requestor_pk_from_core_opens_nothing(pi, requestor, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(requestor)
+
+    with committed():
+        allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk, requestor_pk=admin.pk)
+
+    assert queued == []
+
+
+def test_an_admins_request_is_still_resolved(pi, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin)
+    with committed():
+        allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk)
+
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
 
 # -- Storage success resolves them --------------------------------------------------------------
@@ -125,14 +166,53 @@ def test_share_created_resolves_the_allocation_ticket(pi, queued, committed):
     assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
 
-@pytest.mark.parametrize("value", ["pending", "failed: missing information"])
-def test_share_not_created_resolves_nothing(pi, queued, committed, value):
+def test_a_pending_share_queues_nothing(pi, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+
+    with committed():
+        set_state(allocation, "share_creation_state", "pending")
+
+    assert queued == []
+
+
+@pytest.mark.parametrize("value", ["failed", "failed: missing information"])
+def test_a_failed_share_files_a_failure_ticket(pi, queued, committed, value):
     allocation, _ = make_storage_allocation(pi)
 
     with committed():
         set_state(allocation, "share_creation_state", value)
 
-    assert queued == []
+    assert queued == [("ticketing.tasks.file_storage_failure_ticket", (allocation.pk, None), {"state": value})]
+
+
+def test_a_failed_quota_change_files_a_failure_ticket_for_its_request(pi, queued, committed):
+    change = approve(make_storage_change(pi, old="10", new="20"))
+
+    with committed():
+        set_state(change.allocation, "quota_update_state", "failed")
+
+    assert queued == [
+        ("ticketing.tasks.file_storage_failure_ticket", (change.allocation.pk, change.pk), {"state": "failed"})
+    ]
+
+
+def test_success_after_a_failure_ticket_resolves_both(pi, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    FiledTicket.objects.create(
+        correlation_id=f"coldfront:allocation:{allocation.pk}:storage-failed",
+        kind=FiledTicket.Kind.STORAGE_FAILURE,
+        number="INC0000002",
+        sys_id="i-2",
+        allocation=allocation,
+    )
+
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == [
+        ("ticketing.tasks.resolve_storage_failure_ticket", (allocation.pk, None), {}),
+        ("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {}),
+    ]
 
 
 def test_quota_set_resolves_the_change_request_that_asked_for_it(pi, queued, committed):
@@ -180,6 +260,68 @@ def test_other_attributes_saved_as_success_are_ignored(pi, queued, committed):
         set_state(allocation, "something_else_state", "success")
 
     assert queued == []
+
+
+# -- What storage doesn't provision resolves on approval -----------------------------------------
+
+
+def test_approving_a_storage_allocation_waits_for_storage(pi, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == []
+
+
+def test_activating_a_non_storage_allocation_resolves_it(pi, admin, in_request, queued, committed):
+    allocation = make_cluster_allocation(pi)
+    in_request(admin)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
+    assert markers(allocation) == []
+
+
+def test_approving_a_quota_change_waits_for_storage(pi, admin, in_request, queued, committed):
+    change = approve(make_storage_change(pi))
+    in_request(admin)
+
+    with committed():
+        allocation_change_approved.send(
+            sender=AllocationChangeDetailView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
+
+    assert queued == []
+
+
+def test_approving_a_change_storage_wont_apply_resolves_it(pi, admin, in_request, queued, committed):
+    change = approve(make_storage_change(pi))
+    change.allocationattributechangerequest_set.all().delete()  # an end-date extension, say
+    in_request(admin)
+
+    with committed():
+        allocation_change_approved.send(
+            sender=AllocationChangeDetailView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
+
+    assert queued == [("ticketing.tasks.resolve_allocation_change_ticket", (change.pk,), {})]
+
+
+def test_with_ticketing_off_a_non_storage_activation_resolves_nothing_and_leaves_no_marker(
+    pi, admin, in_request, queued, committed
+):
+    allocation = make_cluster_allocation(pi)
+    in_request(admin, off=True)
+
+    with committed():
+        allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+
+    assert queued == []
+    assert markers(allocation) == []
 
 
 # -- An admin with ticketing off approves: the resolve is skipped --------------------------------
@@ -230,6 +372,22 @@ def test_share_created_after_an_approval_with_ticketing_off_resolves_nothing(pi,
     assert markers(allocation) == []  # used up
 
 
+def test_a_failure_after_an_approval_with_ticketing_off_files_nothing_and_keeps_the_marker(
+    pi, admin, in_request, queued, committed
+):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin, off=True)
+    allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
+    del HistoricalRecords.context.request
+
+    with committed():
+        set_state(allocation, "share_creation_state", "failed")
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == []  # the marker outlived the failure, and suppressed the success too
+
+
 def test_quota_set_after_an_approval_with_ticketing_off_resolves_nothing(pi, admin, in_request, queued, committed):
     change = approve(make_storage_change(pi, old="10", new="20"))
     in_request(admin, off=True)
@@ -259,7 +417,7 @@ def test_a_marker_only_skips_its_own_request(pi, admin, in_request, queued, comm
 
 
 def test_a_marker_that_cant_be_saved_is_logged_and_the_resolve_goes_ahead(pi, admin, in_request, caplog):
-    allocation = make_cluster_allocation(pi)  # no "Text" attribute type exists to build the marker from
+    allocation, _ = make_storage_allocation(pi, path=None)  # no "Text" attribute type to build the marker from
     in_request(admin, off=True)
 
     allocation_activate.send(sender=AllocationDetailView, allocation_pk=allocation.pk)
@@ -363,14 +521,17 @@ def test_the_pis_add_doesnt_use_up_the_request(lab, pi, in_request, queued, comm
     assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": pi.pk})]
 
 
-def test_superusers_added_queue_nothing_and_dont_use_up_the_request(lab, requestor, in_request, queued, committed):
-    f.UserFactory(username="staff01", is_superuser=True)
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+def test_ticketing_admins_added_queue_nothing_and_dont_use_up_the_request(
+    lab, requestor, in_request, queued, committed, request, who
+):
+    added = request.getfixturevalue(who)
     in_request(requestor)
     role = f.ProjectUserRoleChoiceFactory(name="User")
     f.ProjectUserStatusChoiceFactory(name="Active")
 
     with committed():
-        lab.add_user(get_user_model().objects.get(username="staff01"), role, signal_sender=object)
+        lab.add_user(added, role, signal_sender=object)
         add(lab, "u1")
 
     assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]

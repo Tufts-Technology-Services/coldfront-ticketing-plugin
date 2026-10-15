@@ -7,18 +7,27 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     allocation_change_created (AllocationChangeView)       create_allocation_change_ticket
     share_creation_state saved as "success"                resolve_allocation_ticket
     quota_update_state saved as "success"                  resolve_allocation_change_ticket
+    allocation_activate, if storage won't provision        resolve_allocation_ticket
+    allocation_change_approved, if storage won't apply it  resolve_allocation_change_ticket
+    either state saved as "failed..."                      file_storage_failure_ticket
+    either state saved as "success", after a failure       resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
-Requests open a ticket when they're submitted. They're resolved when the storage plugin reports its
-work done, not on approval (decided 2026-10-07): the plugin creates shares and sets quotas in
-background tasks after approval and records the outcome in those two allocation attributes, so
-resolving on approval could tell the customer "done" before -- or despite -- a failure. A failure
-leaves the ticket open for an admin.
+Requests open a ticket when they're submitted, unless a ticketing admin submitted them. Requests the
+storage plugin provisions are resolved when it reports its work done, not on approval (decided
+2026-10-07): the plugin creates shares and sets quotas in background tasks after approval and
+records the outcome in those two allocation attributes, so resolving on approval could tell the
+customer "done" before -- or despite -- a failure. A failure leaves the request's ticket open, and
+files an admin-only child ticket for it, resolved by a later success. Everything else -- other
+resource types, and Storage change requests that don't change the quota -- is resolved on approval
+(storage_will_provision decides; 2026-10-15).
 
-Approval (allocation_activate, allocation_change_approved) queues nothing, but it is the last moment
-the approving admin's request -- and so their ticketing switch -- is visible. If the switch is off,
-the approval leaves a `ticketing_suppressed` marker on the allocation, holding the request's
-correlation_id; the storage success that follows finds it, deletes it and resolves nothing.
+For a request storage provisions, approval queues nothing, but it is the last moment the approving
+admin's request -- and so their ticketing switch -- is visible. If the switch is off, the approval
+leaves a `ticketing_suppressed` marker on the allocation, holding the request's correlation_id; the
+storage success that follows finds it, deletes it and resolves nothing. A failure in between finds
+it too, leaves it, and files nothing. A request resolved on approval needs no marker: the resolve is
+queued inside the admin's request, where enqueue_ticket sees the switch.
 
 Each receiver hands off with ticketing.dispatch.enqueue_ticket, never async_task directly, and
 passes only pks so the task re-queries committed state. Denials, renewals and account upgrades are
@@ -27,7 +36,12 @@ out of scope (see docs/plan.md).
 
 import logging
 
-from coldfront.core.allocation.models import AllocationAttribute, AllocationAttributeChangeRequest
+from coldfront.core.allocation.models import (
+    Allocation,
+    AllocationAttribute,
+    AllocationAttributeChangeRequest,
+    AllocationChangeRequest,
+)
 from coldfront.core.allocation.signals import (
     allocation_activate,
     allocation_change_approved,
@@ -44,13 +58,16 @@ from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
 from coldfront.core.utils.common import import_from_settings
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
+from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from ticketing import toggle
-from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME
+from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME, storage_will_provision
 from ticketing.dispatch import enqueue_ticket
-from ticketing.tasks import allocation_correlation_id, change_correlation_id
+from ticketing.models import FiledTicket
+from ticketing.permissions import is_ticketing_admin
+from ticketing.slots import allocation_correlation_id, change_correlation_id, storage_failure_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +76,12 @@ logger = logging.getLogger(__name__)
 SHARE_STATE_ATTRIBUTE = import_from_settings("TICKETING_SHARE_STATE_ATTRIBUTE", "share_creation_state")
 QUOTA_STATE_ATTRIBUTE = import_from_settings("TICKETING_QUOTA_STATE_ATTRIBUTE", "quota_update_state")
 SUCCESS = "success"
+FAILED = "failed"  # the storage plugin writes "failed" or "failed: <reason>"
 # Private allocation attribute: "an admin approved this with ticketing off; don't resolve it".
 SUPPRESSED_ATTRIBUTE = "ticketing_suppressed"
 
 
-def requestor_pk(kwargs):
+def requestor(kwargs):
     """Who submitted the request: `requestor_pk` if core sends it, else the logged-in user.
 
     Core doesn't send requestor_pk yet (docs/plan.md, A1). These signals are sent from inside the
@@ -71,37 +89,79 @@ def requestor_pk(kwargs):
     task falls back to the PI.
     """
     if kwargs.get("requestor_pk"):
-        return kwargs["requestor_pk"]
+        return get_user_model().objects.filter(pk=kwargs["requestor_pk"]).first()
     user = getattr(toggle.current_request(), "user", None)
-    return user.pk if user is not None and user.is_authenticated else None
+    return user if user is not None and user.is_authenticated else None
+
+
+def requestor_pk(kwargs):
+    return kwargs.get("requestor_pk") or getattr(requestor(kwargs), "pk", None)
+
+
+def sent_by(sender, view) -> bool:
+    """Whether a signal was sent by `view` or a subclass of it.
+
+    The view receivers take every sender and check with this, rather than passing `sender=` to
+    @receiver. Plugins replace core views with subclasses: the storage plugin swaps in its own
+    AllocationCreateView in its ready(), and the URLs then send with the subclass. `sender=` matches
+    one class exactly, and which class the name held when this module was imported depends on the
+    order of INSTALLED_APPS.
+    """
+    return isinstance(sender, type) and issubclass(sender, view)
 
 
 # -- Requests open tickets ----------------------------------------------------------------------
 
 
-@receiver(allocation_new, sender=AllocationCreateView, dispatch_uid="ticketing-allocation-new")
+@receiver(allocation_new, dispatch_uid="ticketing-allocation-new")
 def allocation_requested(sender, allocation_pk, **kwargs):
-    enqueue_ticket("ticketing.tasks.create_allocation_ticket", allocation_pk, requestor_pk=requestor_pk(kwargs))
+    if sent_by(sender, AllocationCreateView):
+        open_request("ticketing.tasks.create_allocation_ticket", allocation_pk, kwargs)
 
 
-@receiver(allocation_change_created, sender=AllocationChangeView, dispatch_uid="ticketing-allocation-change-created")
+@receiver(allocation_change_created, dispatch_uid="ticketing-allocation-change-created")
 def allocation_change_requested(sender, allocation_pk, allocation_change_pk, **kwargs):
-    enqueue_ticket(
-        "ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, requestor_pk=requestor_pk(kwargs)
-    )
+    if sent_by(sender, AllocationChangeView):
+        open_request("ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, kwargs)
+
+
+def open_request(task, pk, kwargs):
+    """Queue the request's ticket, unless a ticketing admin (ticketing.permissions) submitted it.
+
+    Admins submit requests on a customer's behalf, usually for one the customer already asked for in
+    ServiceNow. A ticket opened now would email the PI and Approvers about a second ticket before
+    there's a request to link the original to (decided 2026-10-15). The resolve still goes out: it
+    resolves the ticket an admin linked, or with none, files one already resolved.
+    """
+    user = requestor(kwargs)
+    if is_ticketing_admin(user):
+        logger.info("Not opening a ticket for %s %s: requested by a ticketing admin (%s)", task, pk, user.username)
+        return
+    enqueue_ticket(task, pk, requestor_pk=getattr(user, "pk", None))
 
 
 # -- Approval records an admin's switch; storage success resolves -------------------------------
 
 
-@receiver(allocation_activate, sender=AllocationDetailView, dispatch_uid="ticketing-allocation-activate")
+@receiver(allocation_activate, dispatch_uid="ticketing-allocation-activate")
 def allocation_approved(sender, allocation_pk, **kwargs):
-    suppress_if_off(allocation_pk, allocation_correlation_id(allocation_pk))
+    if not sent_by(sender, AllocationDetailView):
+        return
+    if storage_will_provision(Allocation.objects.get(pk=allocation_pk)):
+        suppress_if_off(allocation_pk, allocation_correlation_id(allocation_pk))
+    else:
+        enqueue_ticket("ticketing.tasks.resolve_allocation_ticket", allocation_pk)
 
 
-@receiver(allocation_change_approved, sender=AllocationChangeDetailView, dispatch_uid="ticketing-change-approved")
+@receiver(allocation_change_approved, dispatch_uid="ticketing-change-approved")
 def allocation_change_approved_(sender, allocation_pk, allocation_change_pk, **kwargs):
-    suppress_if_off(allocation_pk, change_correlation_id(allocation_change_pk))
+    if not sent_by(sender, AllocationChangeDetailView):
+        return
+    change = AllocationChangeRequest.objects.select_related("allocation").get(pk=allocation_change_pk)
+    if storage_will_provision(change.allocation, change):
+        suppress_if_off(allocation_pk, change_correlation_id(allocation_change_pk))
+    else:
+        enqueue_ticket("ticketing.tasks.resolve_allocation_change_ticket", allocation_change_pk)
 
 
 def suppress_if_off(allocation_pk, correlation_id):
@@ -125,46 +185,67 @@ def suppress_if_off(allocation_pk, correlation_id):
     logger.info("Ticketing is off for %s; %s won't be resolved", request.user.username, correlation_id)
 
 
+def _markers(allocation_pk, correlation_id):
+    return AllocationAttribute.objects.filter(
+        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
+    )
+
+
 def take_suppression(allocation_pk, correlation_id) -> bool:
     """Delete the request's suppression marker, returning whether there was one."""
-    deleted, _ = AllocationAttribute.objects.filter(
-        allocation_id=allocation_pk, allocation_attribute_type__name=SUPPRESSED_ATTRIBUTE, value=correlation_id
-    ).delete()
+    deleted, _ = _markers(allocation_pk, correlation_id).delete()
     return bool(deleted)
+
+
+def is_suppressed(allocation_pk, correlation_id) -> bool:
+    """Whether the request has a suppression marker, leaving it for the success that uses it up."""
+    return _markers(allocation_pk, correlation_id).exists()
 
 
 @receiver(post_save, sender=AllocationAttribute, dispatch_uid="ticketing-storage-state")
 def storage_state_saved(sender, instance, **kwargs):
-    """Resolve the request whose storage work just succeeded, unless its approver had ticketing off.
+    """Act on a storage job's outcome, unless its approver had ticketing off.
+
+    A success resolves the request, and the job's failure ticket if one is open. A failure (a value
+    starting "failed") files an admin-only failure ticket, a child of the request's.
 
     Fires on every allocation attribute save, so it bails on the value before touching the database.
-    The storage plugin only saves a state when it changes, so each success arrives once.
+    The storage plugin only saves a state when it changes, so each success arrives once, and a
+    failure once per attempt.
     """
-    if instance.value.strip() != SUCCESS:
+    value = instance.value.strip()
+    if value != SUCCESS and not value.startswith(FAILED):
         return
     name = instance.allocation_attribute_type.name
+    allocation_pk = instance.allocation_id
     if name == SHARE_STATE_ATTRIBUTE:
-        task, pk, correlation_id = (
-            "ticketing.tasks.resolve_allocation_ticket",
-            instance.allocation_id,
-            allocation_correlation_id(instance.allocation_id),
-        )
+        change_pk, correlation_id = None, allocation_correlation_id(allocation_pk)
+        resolve, pk = "ticketing.tasks.resolve_allocation_ticket", allocation_pk
     elif name == QUOTA_STATE_ATTRIBUTE:
-        change_pk = applied_quota_change_pk(instance.allocation_id)
+        change_pk = applied_quota_change_pk(allocation_pk)
         if change_pk is None:
-            logger.info("Quota set on allocation %s with no approved change request for it", instance.allocation_id)
+            logger.info("Quota set on allocation %s with no approved change request for it", allocation_pk)
             return
-        task, pk, correlation_id = (
-            "ticketing.tasks.resolve_allocation_change_ticket",
-            change_pk,
-            change_correlation_id(change_pk),
-        )
+        correlation_id = change_correlation_id(change_pk)
+        resolve, pk = "ticketing.tasks.resolve_allocation_change_ticket", change_pk
     else:
         return
-    if take_suppression(instance.allocation_id, correlation_id):
+
+    if value != SUCCESS:
+        if is_suppressed(allocation_pk, correlation_id):
+            logger.info("Not filing a storage failure for %s: approved with ticketing off", correlation_id)
+            return
+        enqueue_ticket("ticketing.tasks.file_storage_failure_ticket", allocation_pk, change_pk, state=value)
+        return
+
+    if take_suppression(allocation_pk, correlation_id):
         logger.info("Not resolving %s: approved with ticketing off", correlation_id)
         return
-    enqueue_ticket(task, pk)
+    if FiledTicket.objects.filter(
+        correlation_id=storage_failure_correlation_id(correlation_id), resolved_at__isnull=True
+    ).exists():
+        enqueue_ticket("ticketing.tasks.resolve_storage_failure_ticket", allocation_pk, change_pk)
+    enqueue_ticket(resolve, pk)
 
 
 def applied_quota_change_pk(allocation_pk):
@@ -201,13 +282,13 @@ def project_users_changed(sender, project_user_pk, **kwargs):
     ColdFront sends one signal per user added or removed, so changing five users in one form sends
     five. The task's per-day correlation_id stops a second ticket only once the first is filed, and
     five tasks queued together could each look before any had filed; so within a request only the
-    first is queued. Superusers being added or removed are staff, not project members to notify,
-    and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
+    first is queued. Ticketing admins (ticketing.permissions) being added or removed aren't members to
+    notify, and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
     for the new project's PI, and a PI is never otherwise added or removed, so it would only ever
     tell a new project's PI that its users had changed.
     """
     project_user = ProjectUser.objects.select_related("user", "project").get(pk=project_user_pk)
-    if project_user.user.is_superuser or project_user.user_id == project_user.project.pi_id:
+    if is_ticketing_admin(project_user.user) or project_user.user_id == project_user.project.pi_id:
         return
     if not first_in_request(("project-users", project_user.project_id)):
         return

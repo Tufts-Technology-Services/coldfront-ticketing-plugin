@@ -1,11 +1,23 @@
+import datetime
+
 import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 
+from ticketing import client as servicenow
 from ticketing import tasks
-from ticketing.allocation_updates import UnsupportedUpdate, describe_change
-from ticketing.client import Incident
+from ticketing.allocation_updates import (
+    UnsupportedUpdate,
+    describe_activation,
+    describe_change,
+    describe_new_allocation,
+    describe_request,
+    human_name,
+    storage_will_provision,
+)
+from ticketing.client import IncidentRef, UnknownReference
+from ticketing.tasks import people
 
 pytestmark = pytest.mark.django_db
 
@@ -17,14 +29,15 @@ def make_storage_allocation(pi, *, resource_name="Research Storage", quota="10",
     allocation.resources.add(resource)
     quota_attr = f.AllocationAttributeFactory(
         allocation=allocation,
-        allocation_attribute_type=f.AllocationAttributeTypeFactory(name="Storage Quota (TB)"),
+        # Public, since customers see them; ColdFront's model default is private.
+        allocation_attribute_type=f.AllocationAttributeTypeFactory(name="Storage Quota (TB)", is_private=False),
         value=quota,
     )
     if path:
         f.AllocationAttributeFactory(
             allocation=allocation,
             allocation_attribute_type=f.AllocationAttributeTypeFactory(
-                name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text")
+                name="Storage Path", attribute_type=f.AAttributeTypeFactory(name="Text"), is_private=False
             ),
             value=path,
         )
@@ -44,7 +57,7 @@ def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="
 
 
 def make_cluster_allocation(pi):
-    """An allocation on a resource type with no customer message (only Storage has one today)."""
+    """An allocation on a resource type the storage plugin doesn't provision; it gets the generic message."""
     resource = f.ResourceFactory(name="Research Cluster", resource_type=f.ResourceTypeFactory(name="Cluster"))
     allocation = f.AllocationFactory(project=f.ProjectFactory(pi=pi))
     allocation.resources.add(resource)
@@ -63,7 +76,7 @@ class FakeClient:
 
     def create_incident(self, ticket):
         self.created.append(ticket)
-        return Incident(sys_id="i-1", number="INC0000001")
+        return IncidentRef(sys_id="i-1", number="INC0000001")
 
     def update_incident(self, sys_id, fields):
         self.updated.append((sys_id, fields))
@@ -72,7 +85,7 @@ class FakeClient:
 @pytest.fixture
 def use_client(monkeypatch):
     def install(client):
-        monkeypatch.setattr(tasks, "client_from_settings", lambda: client)
+        monkeypatch.setattr(servicenow, "client_from_settings", lambda: client)
         return client
 
     return install
@@ -101,22 +114,158 @@ def test_resource_specific_template_wins_over_the_type_template(pi, settings, tm
     assert update.comments == "RStore says 10 TB -> 20 TB on rt-lab-share"
 
 
-def test_change_without_a_quota_change_is_unsupported(pi):
+def test_a_storage_change_without_a_quota_change_gets_the_generic_message(pi):
     change = make_storage_change(pi)
     change.allocationattributechangerequest_set.all().delete()
+    change.end_date_extension = 90
+    change.save()
 
-    with pytest.raises(UnsupportedUpdate, match="no Storage Quota"):
-        describe_change(change)
+    update = describe_change(change)
+
+    assert update.short_description == f"Research Storage: Allocation Change | {change.allocation.project.title}"
+    assert "- End date extended by 90 days, to " in update.comments
+    assert "quota" not in update.comments.lower()  # not storage.txt's wording
+    assert update.business_service == "Research Data Storage"
+    assert update.close_notes == "Allocation change applied."
 
 
-def test_unknown_resource_type_is_unsupported(pi):
-    change = make_storage_change(pi)
+def test_other_resource_types_get_the_generic_change_message(pi):
+    change = make_storage_change(pi, old="10", new="20")
     resource = change.allocation.resources.first()
     resource.resource_type = f.ResourceTypeFactory(name="Cluster")
     resource.save()
 
-    with pytest.raises(UnsupportedUpdate, match="'Cluster'"):
+    update = describe_change(change)
+
+    assert "have been applied:\n- Storage Quota (TB): 10 -> 20\n" in update.comments
+    assert update.business_service == "High Performance Computing (HPC)"
+
+
+def cluster_change(pi, *private):
+    """A change request on a Cluster allocation, changing Core Usage (Hours) 1000 -> 2000 and any
+    `private` attributes (each to "secret")."""
+    allocation = make_cluster_allocation(pi)
+    change = f.AllocationChangeRequestFactory(allocation=allocation)
+    for name, is_private, new in [("Core Usage (Hours)", False, "2000")] + [(n, True, "secret") for n in private]:
+        attribute = f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=is_private),
+            value="1000" if not is_private else "hidden",
+        )
+        f.AllocationAttributeChangeRequestFactory(
+            allocation_change_request=change, allocation_attribute=attribute, new_value=new
+        )
+        attribute.value = new  # what approval does
+        attribute.save()
+    return change
+
+
+def test_the_generic_change_message_leaves_out_private_attributes(pi):
+    comments = describe_change(cluster_change(pi, "internal_quota")).comments
+
+    assert "- Core Usage (Hours): 1000 -> 2000\n" in comments
+    assert "internal_quota" not in comments and "secret" not in comments and "hidden" not in comments
+
+
+def test_a_change_to_only_private_attributes_lists_nothing(pi):
+    change = cluster_change(pi, "internal_quota")
+    change.allocationattributechangerequest_set.filter(
+        allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
+    ).delete()
+
+    comments = describe_change(change).comments
+
+    assert f"for project {change.allocation.project.title} have been applied.\n" in comments
+    assert "internal_quota" not in comments and "- " not in comments
+
+
+def test_an_allocation_with_no_resource_is_unsupported(pi):
+    change = make_storage_change(pi)
+    change.allocation.resources.clear()
+
+    with pytest.raises(UnsupportedUpdate, match="has no resource"):
         describe_change(change)
+
+
+# -- human_name ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("slurm_account_name", "Slurm account name"),
+        ("slurm-account-name", "Slurm account name"),
+        ("slurmAccountName", "Slurm account name"),
+        ("SlurmAccountName", "Slurm account name"),
+        # known terms
+        ("freeipa_group", "FreeIPA group"),
+        ("share_creation_task_id", "Share creation task ID"),
+        ("gpu_hours", "GPU hours"),
+        ("cloud_account_2fa", "Cloud account 2FA"),
+        ("parent_slurm_account", "Parent Slurm account"),
+        ("utln_list", "Utln list"),  # site terms come from the setting
+        ("unix_GID", "Unix GID"),
+        ("video_id", "Video ID"),  # whole words only: "video" isn't touched
+        # a run of capitals before a capitalized word
+        ("SupportersQOSExpireDate", "Supporters QOS expire date"),
+        ("SupportersQOS", "Supporters QOS"),
+        ("GPUHours", "GPU hours"),
+        # all in capitals: ordinary words, known terms still written their way
+        ("CLOUD_USAGE_NOTIFICATION", "Cloud usage notification"),
+        ("SLURM_GPU_LIMIT", "Slurm GPU limit"),
+        # other capitals kept
+        ("unix_XYZ", "Unix XYZ"),
+        ("Storage_Group_Name", "Storage group name"),
+        ("reported_quota_bytes", "Reported quota bytes"),
+        ("slurm_user_specs_attriblist", "Slurm user specs attriblist"),
+        # already for people, or nothing to split: left alone
+        ("Storage Quota (TB)", "Storage Quota (TB)"),
+        ("Core Usage (Hours)", "Core Usage (Hours)"),
+        ("EXPIRE NOTIFICATION", "EXPIRE NOTIFICATION"),
+        ("quota", "quota"),
+        ("GPU", "GPU"),
+        ("_", "_"),
+    ],
+)
+def test_human_name(name, expected):
+    assert human_name(name) == expected
+
+
+def test_sites_add_known_terms(settings):
+    settings.TICKETING_KNOWN_TERMS = ["UTLN", "RStore", "NetApp", "XSEDE"]
+
+    assert human_name("rstore_share") == "RStore share"
+    assert human_name("pi_utln") == "PI UTLN"
+    assert human_name("netapp_volume") == "NetApp volume"
+    assert human_name("xsede_allocation_id") == "XSEDE allocation ID"  # and the defaults still apply
+
+
+def test_sites_respell_a_default_term(settings):
+    settings.TICKETING_KNOWN_TERMS = ["SLURM"]
+
+    assert human_name("parent_slurm_account") == "Parent SLURM account"
+
+
+# -- storage_will_provision ----------------------------------------------------------------------
+
+
+def test_storage_provisions_a_storage_allocation_and_its_quota_changes(pi):
+    change = make_storage_change(pi)
+
+    assert storage_will_provision(change.allocation)
+    assert storage_will_provision(change.allocation, change)
+
+
+def test_storage_doesnt_apply_a_change_without_a_quota_change(pi):
+    change = make_storage_change(pi)
+    change.allocationattributechangerequest_set.all().delete()
+
+    assert not storage_will_provision(change.allocation, change)
+
+
+def test_storage_doesnt_provision_other_resource_types_or_none(pi):
+    assert not storage_will_provision(make_cluster_allocation(pi))
+    assert not storage_will_provision(f.AllocationFactory(project=f.ProjectFactory(pi=pi)))
 
 
 # -- resolve_allocation_change_ticket ----------------------------------------------------------
@@ -124,9 +273,9 @@ def test_unknown_resource_type_is_unsupported(pi):
 
 def test_resolves_the_open_incident_for_the_change(pi, use_client):
     change = make_storage_change(pi)
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="2")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="2")))
 
-    assert tasks.resolve_allocation_change_ticket(change.pk) == Incident(sys_id="i-0", number="INC0000000")
+    assert tasks.resolve_allocation_change_ticket(change.pk) == IncidentRef(sys_id="i-0", number="INC0000000")
     assert client.looked_up == f"coldfront:allocation-change:{change.pk}"
     [(sys_id, fields)] = client.updated
     assert sys_id == "i-0"
@@ -140,7 +289,7 @@ def test_resolves_the_open_incident_for_the_change(pi, use_client):
 
 def test_resolving_keeps_the_assignee_an_admin_set(pi, use_client):
     change = make_storage_change(pi)
-    picked_up = Incident(sys_id="i-0", number="INC0000000", state="2", assigned_to="u-admin")
+    picked_up = IncidentRef(sys_id="i-0", number="INC0000000", state="2", assigned_to="u-admin")
     client = use_client(FakeClient(existing=picked_up))
 
     tasks.resolve_allocation_change_ticket(change.pk)
@@ -152,7 +301,7 @@ def test_resolving_keeps_the_assignee_an_admin_set(pi, use_client):
 
 def test_already_resolved_incident_is_not_commented_on_again(pi, use_client):
     change = make_storage_change(pi)
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="6")))
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="6")))
 
     tasks.resolve_allocation_change_ticket(change.pk)
 
@@ -191,8 +340,8 @@ def test_without_a_requestor_the_pi_is_the_caller(pi, use_client):
 
 def test_unsupported_change_leaves_servicenow_alone(pi, use_client):
     change = make_storage_change(pi)
-    change.allocationattributechangerequest_set.all().delete()
-    client = use_client(FakeClient(existing=Incident(sys_id="i-0", number="INC0000000", state="2")))
+    change.allocation.resources.clear()
+    client = use_client(FakeClient(existing=IncidentRef(sys_id="i-0", number="INC0000000", state="2")))
 
     assert tasks.resolve_allocation_change_ticket(change.pk) is None
     assert client.updated == [] and client.created == []
@@ -205,14 +354,14 @@ def test_contact_type_pi_and_manager_are_self_service(pi, requestor):
     project = f.ProjectFactory(pi=pi)
     f.ProjectUserFactory(project=project, user=requestor, role=f.ProjectUserRoleChoiceFactory(name="Manager"))
 
-    assert tasks.contact_type_for(pi, project) == "self-service"
-    assert tasks.contact_type_for(requestor, project) == "self-service"
+    assert people.contact_type_for(pi, project) == "self-service"
+    assert people.contact_type_for(requestor, project) == "self-service"
 
 
 def test_contact_type_superuser_on_someone_elses_project_is_email(pi, django_user_model):
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
-    assert tasks.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
+    assert people.contact_type_for(admin, f.ProjectFactory(pi=pi)) == "email"
 
 
 # -- project_watchers --------------------------------------------------------------------------
@@ -242,19 +391,19 @@ def project_with_approvers(pi):
 
 
 def test_pi_request_watches_the_approvers(pi, project_with_approvers):
-    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
 
 
 def test_approver_request_watches_the_pi_and_the_other_approvers(project_with_approvers):
     approver = get_user_model().objects.get(username="bjones03")
 
-    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+    assert people.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
 
 
 def test_administrator_request_watches_the_pi_and_every_approver(project_with_approvers, django_user_model):
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
 
-    assert tasks.project_watchers(project_with_approvers, admin) == ["asmith02", "bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, admin) == ["asmith02", "bjones03", "czhang04"]
 
 
 def test_only_active_approvers_with_notifications_on_are_watchers(pi, project_with_approvers):
@@ -262,14 +411,14 @@ def test_only_active_approvers_with_notifications_on_are_watchers(pi, project_wi
     add_member(project_with_approvers, "egarcia06", status="Removed")
     add_member(project_with_approvers, "fkim07", enable_notifications=False)
 
-    assert tasks.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
+    assert people.project_watchers(project_with_approvers, pi) == ["bjones03", "czhang04"]
 
 
 def test_the_pi_is_watched_even_without_notifications(project_with_approvers, pi):
     project_with_approvers.projectuser_set.filter(user=pi).update(enable_notifications=False)
     approver = get_user_model().objects.get(username="bjones03")
 
-    assert tasks.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
+    assert people.project_watchers(project_with_approvers, approver) == ["asmith02", "czhang04"]
 
 
 def test_approver_request_ticket_watches_the_pi_and_other_approvers(pi, project_with_approvers, use_client):
@@ -325,15 +474,18 @@ class FakeServiceNow:
     """Remembers incidents by correlation_id, so a create -> resolve lifecycle can be followed."""
 
     def __init__(self):
-        self.incidents = {}  # correlation_id -> (Incident, fields)
+        self.incidents = {}  # correlation_id -> (IncidentRef, fields)
 
     def find_incident(self, correlation_id):
         found = self.incidents.get(correlation_id)
         return found[0] if found else None
 
+    def sys_id_for(self, table, column, value):
+        return f"<{table}.{column}={value}>"
+
     def create_incident(self, ticket):
         n = len(self.incidents) + 1
-        incident = Incident(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
+        incident = IncidentRef(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
         self.incidents[ticket.correlation_id] = (incident, vars(ticket).copy())
         return incident
 
@@ -342,7 +494,7 @@ class FakeServiceNow:
             if incident.sys_id == sys_id:
                 stored.update(fields)
                 self.incidents[cid] = (
-                    Incident(sys_id, incident.number, state=fields.get("state", incident.state)),
+                    IncidentRef(sys_id, incident.number, state=fields.get("state", incident.state)),
                     stored,
                 )
 
@@ -448,7 +600,52 @@ def test_every_new_allocation_gets_a_request_ticket(pi, use_client):
 
     [(_, ticket)] = snow.incidents.values()
     assert ticket["short_description"] == f"Research Cluster: New Allocation Request | {allocation.project.title}"
-    assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # Ticket default
+    assert ticket["u_business_service"] == "High Performance Computing (HPC)"  # ServiceNowIncident default
+
+
+def test_the_new_allocation_request_description_leaves_out_private_attributes(pi, requestor):
+    allocation = make_cluster_allocation(pi)
+    for name, value, private in [("slurm_account_name", "smith_lab", False), ("internal_note", "hidden", True)]:
+        f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=private),
+            value=value,
+        )
+
+    description = describe_new_allocation(allocation, requestor).description
+
+    assert "- Slurm account name: smith_lab" in description
+    assert "internal_note" not in description and "hidden" not in description
+
+
+def test_the_change_request_description_leaves_out_private_attributes(pi, requestor):
+    description = describe_request(cluster_change(pi, "internal_quota"), requestor).description
+
+    assert "- Core Usage (Hours): 2000 -> 2000" in description  # values as stored; approval already applied
+    assert "internal_quota" not in description and "secret" not in description
+
+
+def test_a_change_request_of_only_private_attributes_says_why_none_are_shown(pi, requestor):
+    change = cluster_change(pi, "internal_quota")
+    change.allocationattributechangerequest_set.filter(
+        allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
+    ).delete()
+
+    description = describe_request(change, requestor).description
+
+    assert "- (none shown here; private attributes are left out, see ColdFront)" in description
+
+
+def test_a_private_quota_still_names_the_quota_in_the_short_description(pi, requestor):
+    change = make_storage_change(pi, old="10", new="20")
+    quota_type = change.allocationattributechangerequest_set.get().allocation_attribute.allocation_attribute_type
+    quota_type.is_private = True
+    quota_type.save()
+
+    request = describe_request(change, requestor)
+
+    assert request.short_description == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
+    assert "Storage Quota (TB)" not in request.description
 
 
 def test_new_allocation_request_rerun_returns_the_existing_incident(pi, use_client):
@@ -493,13 +690,156 @@ def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
     assert "Path:" not in ticket["comments"]
 
 
-def test_activation_of_an_unsupported_allocation_leaves_its_incident_open(pi, use_client):
+# -- Staff requests are assigned to the admin who approved them --------------------------------
+
+
+def submitted_by(in_request, submitter, pi):
+    """A storage allocation requested by `submitter`, recorded in its history as a view would."""
+    in_request(submitter)
+    allocation, _ = make_storage_allocation(pi)
+    allocation.status = f.AllocationStatusChoiceFactory(name="New")
+    allocation.save()
+    return allocation
+
+
+def set_status(in_request, user, obj, status):
+    in_request(user)
+    obj.status = status
+    obj.save()
+
+
+def test_an_admins_request_is_filed_resolved_and_assigned_to_the_admin_who_activated_it(
+    pi, ticketing_admin, admin, in_request, use_client
+):
+    allocation = submitted_by(in_request, ticketing_admin, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    snow = use_client(FakeServiceNow())
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    [(incident, ticket)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert ticket["assigned_to"] == "admin01"
+
+
+def admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow, assigned_to=None):
+    """A change request a ticketing admin submitted and `admin` approved, with a linked open incident."""
+    in_request(ticketing_admin)
+    change = make_storage_change(pi)
+    set_status(in_request, admin, change, f.AllocationChangeStatusChoiceFactory(name="Approved"))
+    cid = f"coldfront:allocation-change:{change.pk}"
+    snow.incidents[cid] = (IncidentRef("i-9", "INC0000009", "2", assigned_to=assigned_to), {})
+    return change, cid
+
+
+@pytest.mark.parametrize("assigned_to", [None, "u-someone"])
+def test_an_admins_requests_linked_incident_is_assigned_to_the_approver(
+    pi, ticketing_admin, admin, in_request, use_client, assigned_to
+):
+    snow = use_client(FakeServiceNow())
+    change, cid = admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow, assigned_to)
+
+    assert tasks.resolve_allocation_change_ticket(change.pk) == IncidentRef("i-9", "INC0000009")
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert fields["assigned_to"] == "admin01"  # even over an assignee already set
+
+
+class NoSuchUser(FakeServiceNow):
+    """FakeServiceNow whose instance has no user `missing`, as ServiceNowClient reports it."""
+
+    def __init__(self, missing):
+        super().__init__()
+        self.missing = missing
+
+    def sys_id_for(self, table, column, value):
+        if value == self.missing:
+            raise UnknownReference(f"found no {table} with {column}={value}")
+        return super().sys_id_for(table, column, value)
+
+
+def test_an_approver_servicenow_doesnt_know_falls_back_to_the_service_account(
+    pi, ticketing_admin, admin, in_request, use_client, caplog
+):
+    snow = use_client(NoSuchUser("admin01"))
+    change, cid = admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow)
+
+    tasks.resolve_allocation_change_ticket(change.pk)
+
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert fields["assigned_to"] == "svc_test"
+    assert "ServiceNow has no user admin01" in caplog.text
+
+
+def test_the_latest_activation_is_the_one_that_counts(pi, ticketing_admin, admin, in_request, django_user_model):
+    allocation = submitted_by(in_request, ticketing_admin, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Inactive"))
+    other = django_user_model.objects.create_superuser(username="admin02", password="pw")
+    set_status(in_request, other, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    set_status(in_request, admin, allocation, allocation.status)  # an edit while Active isn't an activation
+
+    assert people.admin_request_approver(allocation, "Active") == "admin02"
+
+
+def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, in_request, use_client):
+    allocation = submitted_by(in_request, requestor, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    snow = use_client(FakeServiceNow())
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["assigned_to"] == "svc_test"
+
+
+def test_without_history_users_there_is_no_approver(pi):
+    allocation, _ = make_storage_allocation(pi)  # saved outside a request
+
+    assert people.admin_request_approver(allocation, "Active") is None
+
+
+def test_activation_of_a_non_storage_allocation_resolves_with_the_generic_message(pi, use_client):
     allocation = make_cluster_allocation(pi)
     snow = use_client(FakeServiceNow())
 
     tasks.create_allocation_ticket(allocation.pk)
-    assert tasks.resolve_allocation_ticket(allocation.pk) is None
+    tasks.resolve_allocation_ticket(allocation.pk)
 
     [(incident, fields)] = snow.incidents.values()
-    assert incident.state == "2"
-    assert "comments" not in fields or fields["comments"] is None
+    assert incident.state == "6"
+    assert (
+        f"Your new allocation of Research Cluster for project {allocation.project.title} is now active."
+        in fields["comments"]
+    )
+    assert fields["close_notes"] == "Allocation activated."
+
+
+def test_the_generic_activation_message_shows_the_end_date_and_public_attributes(pi):
+    allocation = make_cluster_allocation(pi)
+    allocation.end_date = datetime.date(2027, 6, 30)
+    allocation.save()
+    for name, value, private in [
+        ("slurm_account_name", "smith_lab", False),
+        ("Core Usage (Hours)", "5000", False),
+        ("internal_note", "do not show", True),
+    ]:
+        f.AllocationAttributeFactory(
+            allocation=allocation,
+            allocation_attribute_type=f.AllocationAttributeTypeFactory(name=name, is_private=private),
+            value=value,
+        )
+
+    comments = describe_activation(allocation).comments
+
+    assert "It runs until June 30, 2027." in comments
+    assert "Allocation details:\n- Core Usage (Hours): 5000\n- Slurm account name: smith_lab\n" in comments
+    assert "internal_note" not in comments and "do not show" not in comments
+
+
+def test_the_generic_activation_message_without_attributes_has_no_details_section(pi):
+    comments = describe_activation(make_cluster_allocation(pi)).comments
+
+    assert "Allocation details" not in comments
+    assert "is now active.\n" in comments

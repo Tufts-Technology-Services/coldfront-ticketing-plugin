@@ -1,0 +1,10 @@
+{% autoescape off %}Hello,
+
+The requested changes to your allocation on {{ resource.name }} for project {{ project.title }} have been applied{% if attribute_changes or change.end_date_extension %}:
+{% for c in attribute_changes %}- {{ c.name }}: {% if c.old is not None %}{{ c.old }} -> {% endif %}{{ c.new }}
+{% endfor %}{% if change.end_date_extension %}- End date extended by {{ change.end_date_extension }} days, to {{ allocation.end_date }}
+{% endif %}{% else %}.
+{% endif %}
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

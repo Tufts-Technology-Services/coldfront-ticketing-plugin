@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import requests
 
-from ticketing.tickets import Ticket, to_payload, to_update
+from ticketing.tickets import ServiceNowIncident, to_payload, to_update
 
 DEFAULT_TIMEOUT = 30
 INCIDENT_TABLE = "incident"
@@ -26,12 +26,16 @@ class UnknownReference(ServiceNowError, LookupError):
 
 
 @dataclass(frozen=True)
-class Incident:
+class IncidentRef:
+    """An incident that exists in ServiceNow, as the API returns it: enough to find, update and
+    record it. Not its content (tickets.ServiceNowIncident, what's sent to file one)."""
+
     sys_id: str
     number: str
-    # Only filled in by find_incident. Left out of equality: an Incident is identified by sys_id.
+    # Only filled in by find_incident. Left out of equality: an IncidentRef is identified by sys_id.
     state: str | None = field(default=None, compare=False)
     assigned_to: str | None = field(default=None, compare=False)  # a sys_id; None if unassigned
+    correlation_id: str | None = field(default=None, compare=False)  # only from find_incident_by_number
 
 
 class ServiceNowClient:
@@ -95,27 +99,31 @@ class ServiceNowClient:
 
     # -- Incidents -----------------------------------------------------------------------------
 
-    def create_incident(self, ticket: Ticket) -> Incident:
-        payload = to_payload(ticket, self.sys_id_for)
+    def create_incident(self, incident: ServiceNowIncident) -> IncidentRef:
+        payload = to_payload(incident, self.sys_id_for)
         result = self.create(INCIDENT_TABLE, payload, return_fields=("sys_id", "number"))
-        return Incident(sys_id=result["sys_id"], number=result["number"])
+        return IncidentRef(sys_id=result["sys_id"], number=result["number"])
 
-    def find_incident(self, correlation_id) -> Incident | None:
-        matches = self.find(
-            INCIDENT_TABLE,
-            "correlation_id",
-            correlation_id,
-            return_fields=("sys_id", "number", "state", "assigned_to"),
-        )
+    def find_incident(self, correlation_id) -> IncidentRef | None:
+        return self._find_incident("correlation_id", correlation_id)
+
+    def find_incident_by_number(self, number) -> IncidentRef | None:
+        """The incident numbered `number` (e.g. INC0012345), with its correlation_id."""
+        return self._find_incident("number", number, "correlation_id")
+
+    def _find_incident(self, column, value, *extra_fields) -> IncidentRef | None:
+        fields = ("sys_id", "number", "state", "assigned_to", *extra_fields)
+        matches = self.find(INCIDENT_TABLE, column, value, return_fields=fields)
         if not matches:
             return None
         match = matches[0]
-        return Incident(
+        return IncidentRef(
             sys_id=match["sys_id"],
             number=match["number"],
             state=match.get("state"),
-            # An empty reference comes back as "".
+            # An empty reference or string comes back as "".
             assigned_to=match.get("assigned_to") or None,
+            correlation_id=match.get("correlation_id") or None,
         )
 
     def update_incident(self, sys_id, fields: dict) -> None:

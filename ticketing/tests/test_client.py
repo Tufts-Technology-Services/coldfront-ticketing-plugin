@@ -4,8 +4,8 @@ import pytest
 import responses
 from responses import matchers
 
-from ticketing.client import Incident, ServiceNowClient, ServiceNowError, UnknownReference
-from ticketing.tickets import Ticket
+from ticketing.client import IncidentRef, ServiceNowClient, ServiceNowError, UnknownReference
+from ticketing.tickets import ServiceNowIncident
 
 BASE = "https://servicenow.example"
 TABLE = f"{BASE}/api/now/v1/table"
@@ -31,7 +31,7 @@ def user_lookup(api, utln, sys_id):
 
 
 def ticket():
-    return Ticket(
+    return ServiceNowIncident(
         u_contact_person="jdoe01",
         caller_id="jdoe01",
         short_description="New allocation request",
@@ -54,7 +54,7 @@ def test_create_incident_resolves_references_and_returns_number(client, api):
 
     incident = client.create_incident(ticket())
 
-    assert incident == Incident(sys_id="i-1", number="INC0000001")
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     body = json.loads(create.calls[0].request.body)
     assert body["caller_id"] == body["u_contact_person"] == "u-jdoe"
     assert body["assigned_to"] == "u-svc"
@@ -142,7 +142,7 @@ def test_find_incident_by_correlation_id(client, api):
         json={"result": [{"sys_id": "i-1", "number": "INC0000001"}]},
     )
 
-    assert client.find_incident("coldfront:allocation:7") == Incident(sys_id="i-1", number="INC0000001")
+    assert client.find_incident("coldfront:allocation:7") == IncidentRef(sys_id="i-1", number="INC0000001")
 
 
 @pytest.mark.parametrize(("stored", "expected"), [("u-svc", "u-svc"), ("", None)])
@@ -154,6 +154,34 @@ def test_find_incident_reports_the_assignee(client, api, stored, expected):
     )
 
     assert client.find_incident("coldfront:allocation:7").assigned_to == expected
+
+
+@pytest.mark.parametrize(("stored", "expected"), [("coldfront:allocation:7", "coldfront:allocation:7"), ("", None)])
+def test_find_incident_by_number_reports_its_correlation_id(client, api, stored, expected):
+    api.get(
+        f"{TABLE}/incident",
+        match=[
+            matchers.query_param_matcher(
+                {
+                    "sysparm_query": "number=INC0000001",
+                    "sysparm_fields": "sys_id,number,state,assigned_to,correlation_id",
+                },
+                strict_match=False,
+            )
+        ],
+        json={"result": [{"sys_id": "i-1", "number": "INC0000001", "state": "1", "correlation_id": stored}]},
+    )
+
+    incident = client.find_incident_by_number("INC0000001")
+
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
+    assert incident.correlation_id == expected
+
+
+def test_find_incident_by_number_returns_none_when_absent(client, api):
+    api.get(f"{TABLE}/incident", status=404, json=NO_RECORD)
+
+    assert client.find_incident_by_number("INC0000001") is None
 
 
 def test_find_incident_returns_none_when_absent(client, api):

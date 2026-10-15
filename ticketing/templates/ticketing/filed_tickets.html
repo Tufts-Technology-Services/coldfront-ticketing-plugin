@@ -1,0 +1,99 @@
+{% comment %}
+Card listing the ServiceNow tickets filed about `subject` (an allocation or project), with links, and
+a form to link a ticket filed in ServiceNow directly. Ticketing admins only. Include it guarded on the
+context processor's variable, which only ticketing admins get, so the page still renders on sites without
+this plugin:
+  {% if ticketing_toggle %}{% include 'ticketing/filed_tickets.html' with subject=allocation %}{% endif %}
+{% endcomment %}
+{% load ticketing_tags %}
+{% link_form_for subject as link_form %}
+{% if link_form %}
+{% filed_tickets_for subject as filed_tickets %}
+<div class="card mb-3" id="ticketing-filed-tickets">
+  <div class="card-header">
+    <h3 class="d-inline"><i class="fas fa-ticket-alt" aria-hidden="true"></i> ServiceNow Tickets</h3>
+    <span class="badge bg-secondary">{{ filed_tickets|length }}</span>
+  </div>
+  <div class="card-body">
+    {% if filed_tickets %}
+      <div class="table-responsive">
+        <table class="table table-hover">
+          <thead>
+            <tr>
+              <th scope="col">Ticket</th>
+              <th scope="col">For</th>
+              <th scope="col">Filed</th>
+              <th scope="col">Resolved by ColdFront</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in filed_tickets %}
+              {% with ticket=row.ticket %}
+              <tr>
+                <td>
+                  <a href="{{ ticket.url }}" target="_blank" rel="noopener noreferrer">{{ ticket.number }}</a>
+                  {% if ticket.source == "linked" %}
+                    <span class="badge bg-info text-dark" title="Filed in ServiceNow{% if ticket.linked_by %}; linked by {{ ticket.linked_by.username }}{% endif %}{% if ticket.linked_at %} on {{ ticket.linked_at }}{% endif %}">linked</span>
+                    {% if not ticket.resolved_at %}
+                      <form method="post" action="{% url 'ticketing-unlink' ticket.pk %}" class="d-inline"
+                            onsubmit="return confirm('Unlink {{ ticket.number }}? ColdFront will stop treating it as this request\'s ticket.');">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="btn btn-link btn-sm p-0 align-baseline"
+                                title="Undo the link. Possible until the ticket is resolved.">unlink</button>
+                      </form>
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td>
+                  {{ ticket.get_kind_display }}:
+                  {% if row.about_url %}<a href="{{ row.about_url }}">{{ row.about }}</a>{% else %}{{ row.about }}{% endif %}
+                  {% if row.parent %}
+                    <br><small>child of <a href="{{ row.parent.url }}" target="_blank" rel="noopener noreferrer">{{ row.parent.number }}</a></small>
+                  {% elif ticket.kind == "storage-failure" %}
+                    <br><small class="text-muted">no request ticket to be a child of</small>
+                  {% endif %}
+                  <br><small class="text-muted">{{ ticket.correlation_id }}</small>
+                </td>
+                <td>{{ ticket.created }}</td>
+                <td>{{ ticket.resolved_at|default:"-" }}</td>
+              </tr>
+              {% endwith %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-muted">No ServiceNow tickets yet.</p>
+    {% endif %}
+
+    <form method="post" action="{{ link_form.action }}" class="row g-2 align-items-end">
+      {% csrf_token %}
+      <div class="col-auto">
+        <label for="ticketing-link-number" class="form-label">Link a ServiceNow ticket</label>
+        <input type="text" id="ticketing-link-number" name="number" class="form-control" placeholder="INC0000000"
+               pattern="[Ii][Nn][Cc][0-9]+" required>
+      </div>
+      <div class="col-auto">
+        <label for="ticketing-link-target" class="form-label">for</label>
+        <select id="ticketing-link-target" name="target" class="form-select">
+          {% regroup link_form.targets by group as groups %}
+          {% for group in groups %}
+            {% if group.grouper %}<optgroup label="{{ group.grouper }}">{% endif %}
+            {% for target in group.list %}
+              <option value="{{ target.correlation_id }}">{{ target.label }}</option>
+            {% endfor %}
+            {% if group.grouper %}</optgroup>{% endif %}
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary"
+                title="ColdFront will resolve this ticket instead of filing its own. If it already opened one, that one is closed as a duplicate.">
+          Link
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
