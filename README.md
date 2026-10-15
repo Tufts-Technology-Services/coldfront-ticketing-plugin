@@ -42,6 +42,10 @@ settings).
 | Allocation or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | Nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 
+A sender view also matches its subclasses: the storage plugin, for one, replaces
+`AllocationCreateView` with its own subclass, so matching the class exactly would depend on the
+order of `INSTALLED_APPS`.
+
 **Requests resolve on storage success, not on approval.** The storage plugin creates shares and
 sets quotas in background tasks after approval, and records each outcome in an allocation
 attribute. Resolving on approval could tell the customer "done" before, or despite, a failure. A

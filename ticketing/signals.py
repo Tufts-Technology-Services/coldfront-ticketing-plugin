@@ -82,17 +82,31 @@ def requestor_pk(kwargs):
     return kwargs.get("requestor_pk") or getattr(requestor(kwargs), "pk", None)
 
 
+def sent_by(sender, view) -> bool:
+    """Whether a signal was sent by `view` or a subclass of it.
+
+    The view receivers take every sender and check with this, rather than passing `sender=` to
+    @receiver. Plugins replace core views with subclasses: the storage plugin swaps in its own
+    AllocationCreateView in its ready(), and the URLs then send with the subclass. `sender=` matches
+    one class exactly, and which class the name held when this module was imported depends on the
+    order of INSTALLED_APPS.
+    """
+    return isinstance(sender, type) and issubclass(sender, view)
+
+
 # -- Requests open tickets ----------------------------------------------------------------------
 
 
-@receiver(allocation_new, sender=AllocationCreateView, dispatch_uid="ticketing-allocation-new")
+@receiver(allocation_new, dispatch_uid="ticketing-allocation-new")
 def allocation_requested(sender, allocation_pk, **kwargs):
-    open_request("ticketing.tasks.create_allocation_ticket", allocation_pk, kwargs)
+    if sent_by(sender, AllocationCreateView):
+        open_request("ticketing.tasks.create_allocation_ticket", allocation_pk, kwargs)
 
 
-@receiver(allocation_change_created, sender=AllocationChangeView, dispatch_uid="ticketing-allocation-change-created")
+@receiver(allocation_change_created, dispatch_uid="ticketing-allocation-change-created")
 def allocation_change_requested(sender, allocation_pk, allocation_change_pk, **kwargs):
-    open_request("ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, kwargs)
+    if sent_by(sender, AllocationChangeView):
+        open_request("ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, kwargs)
 
 
 def open_request(task, pk, kwargs):
@@ -113,14 +127,16 @@ def open_request(task, pk, kwargs):
 # -- Approval records an admin's switch; storage success resolves -------------------------------
 
 
-@receiver(allocation_activate, sender=AllocationDetailView, dispatch_uid="ticketing-allocation-activate")
+@receiver(allocation_activate, dispatch_uid="ticketing-allocation-activate")
 def allocation_approved(sender, allocation_pk, **kwargs):
-    suppress_if_off(allocation_pk, allocation_correlation_id(allocation_pk))
+    if sent_by(sender, AllocationDetailView):
+        suppress_if_off(allocation_pk, allocation_correlation_id(allocation_pk))
 
 
-@receiver(allocation_change_approved, sender=AllocationChangeDetailView, dispatch_uid="ticketing-change-approved")
+@receiver(allocation_change_approved, dispatch_uid="ticketing-change-approved")
 def allocation_change_approved_(sender, allocation_pk, allocation_change_pk, **kwargs):
-    suppress_if_off(allocation_pk, change_correlation_id(allocation_change_pk))
+    if sent_by(sender, AllocationChangeDetailView):
+        suppress_if_off(allocation_pk, change_correlation_id(allocation_change_pk))
 
 
 def suppress_if_off(allocation_pk, correlation_id):

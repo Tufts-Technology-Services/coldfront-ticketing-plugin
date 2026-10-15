@@ -87,6 +87,20 @@ def test_other_senders_are_ignored(pi, queued, committed):
     assert queued == []
 
 
+class ReplacedCreateView(AllocationCreateView):
+    """Like the storage plugin's view, which it swaps in for core's AllocationCreateView."""
+
+
+def test_a_view_a_plugin_replaced_still_opens_a_ticket(pi, requestor, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(requestor)
+
+    with committed():
+        allocation_new.send(sender=ReplacedCreateView, allocation_pk=allocation.pk)
+
+    assert queued == [("ticketing.tasks.create_allocation_ticket", (allocation.pk,), {"requestor_pk": requestor.pk})]
+
+
 def test_change_request_opens_a_ticket(pi, requestor, in_request, queued, committed):
     change = make_storage_change(pi)
     in_request(requestor)
