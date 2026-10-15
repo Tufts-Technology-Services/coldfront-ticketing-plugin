@@ -11,6 +11,8 @@ import logging
 
 from simple_history.models import HistoricalRecords
 
+from ticketing.permissions import is_ticketing_admin
+
 logger = logging.getLogger(__name__)
 
 SESSION_KEY = "ticketing_off"
@@ -27,9 +29,8 @@ def tracking_active(request):
 
 
 def is_off(request):
-    """True when the request's user is a superuser who has switched ticketing off."""
-    user = getattr(request, "user", None)
-    return bool(user and user.is_superuser and request.session.get(SESSION_KEY, False))
+    """True when the request's user is a ticketing admin who has switched ticketing off."""
+    return is_ticketing_admin(getattr(request, "user", None)) and bool(request.session.get(SESSION_KEY, False))
 
 
 def set_off(request, off):

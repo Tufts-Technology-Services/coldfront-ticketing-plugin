@@ -1,7 +1,7 @@
 {% comment %}
 Card listing the ServiceNow tickets filed about `subject` (an allocation or project), with links, and
-a form to link a ticket filed in ServiceNow directly. Superusers only. Include it guarded on the
-context processor's variable, which only superusers get, so the page still renders on sites without
+a form to link a ticket filed in ServiceNow directly. Ticketing admins only. Include it guarded on the
+context processor's variable, which only ticketing admins get, so the page still renders on sites without
 this plugin:
   {% if ticketing_toggle %}{% include 'ticketing/filed_tickets.html' with subject=allocation %}{% endif %}
 {% endcomment %}

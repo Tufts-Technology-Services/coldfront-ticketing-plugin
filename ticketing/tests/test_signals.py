@@ -12,7 +12,6 @@ from coldfront.core.allocation.views import (
     AllocationDetailView,
 )
 from coldfront.core.test_helpers import factories as f
-from django.contrib.auth import get_user_model
 from simple_history.models import HistoricalRecords
 
 from ticketing.tests.test_allocation_updates import (
@@ -100,14 +99,41 @@ def test_change_request_opens_a_ticket(pi, requestor, in_request, queued, commit
     assert queued == [("ticketing.tasks.create_allocation_change_ticket", (change.pk,), {"requestor_pk": requestor.pk})]
 
 
-def test_admin_with_ticketing_off_opens_nothing(pi, admin, in_request, queued, committed):
+@pytest.mark.parametrize("who", ["ticketing_admin", "admin"])
+def test_ticketing_admins_requests_open_nothing(pi, in_request, queued, committed, request, who):
     allocation, _ = make_storage_allocation(pi)
-    in_request(admin, off=True)
+    change = make_storage_change(pi)
+    in_request(request.getfixturevalue(who))
 
     with committed():
         allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk)
+        allocation_change_created.send(
+            sender=AllocationChangeView, allocation_pk=change.allocation.pk, allocation_change_pk=change.pk
+        )
 
     assert queued == []
+
+
+def test_an_admin_requestor_pk_from_core_opens_nothing(pi, requestor, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(requestor)
+
+    with committed():
+        allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk, requestor_pk=admin.pk)
+
+    assert queued == []
+
+
+def test_an_admins_request_is_still_resolved(pi, admin, in_request, queued, committed):
+    allocation, _ = make_storage_allocation(pi)
+    in_request(admin)
+    with committed():
+        allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk)
+
+    with committed():
+        set_state(allocation, "share_creation_state", "success")
+
+    assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
 
 # -- Storage success resolves them --------------------------------------------------------------
@@ -363,14 +389,17 @@ def test_the_pis_add_doesnt_use_up_the_request(lab, pi, in_request, queued, comm
     assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": pi.pk})]
 
 
-def test_superusers_added_queue_nothing_and_dont_use_up_the_request(lab, requestor, in_request, queued, committed):
-    f.UserFactory(username="staff01", is_superuser=True)
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+def test_ticketing_admins_added_queue_nothing_and_dont_use_up_the_request(
+    lab, requestor, in_request, queued, committed, request, who
+):
+    added = request.getfixturevalue(who)
     in_request(requestor)
     role = f.ProjectUserRoleChoiceFactory(name="User")
     f.ProjectUserStatusChoiceFactory(name="Active")
 
     with committed():
-        lab.add_user(get_user_model().objects.get(username="staff01"), role, signal_sender=object)
+        lab.add_user(added, role, signal_sender=object)
         add(lab, "u1")
 
     assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]

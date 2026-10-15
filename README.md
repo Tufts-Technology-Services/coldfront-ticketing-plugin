@@ -12,8 +12,8 @@ approved work done.
 **Not yet deployed.** The ServiceNow client (`client.py`), the incident payload (`tickets.py`), the
 tasks (`tasks.py`) and the signal receivers (`signals.py`) are written and tested, and the
 allocation lifecycles have been trial-run on a development instance. Requests open a ticket when
-submitted; the storage plugin's success resolves it. See `docs/plan.md` for the status of each
-piece and what is still open.
+submitted (unless a ticketing admin submitted them); the storage plugin's success resolves it. See
+`docs/plan.md` for the status of each piece and what is still open.
 
 `ticketing/tickets.py` holds the `Ticket` dataclass and `to_payload`, which turns it into the
 Table API body, resolving UTLNs and group names to sys_ids.
@@ -35,10 +35,10 @@ settings).
 
 | Event | Signal | Sender | Action |
 |---|---|---|---|
-| New allocation request | `allocation_new` | `AllocationCreateView` | Create incident |
-| Share created | `post_save`: `share_creation_state` = `success` | `AllocationAttribute` | Resolve the allocation's incident |
-| New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident |
-| Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident |
+| New allocation request | `allocation_new` | `AllocationCreateView` | Create incident, unless a ticketing admin submitted it |
+| Share created | `post_save`: `share_creation_state` = `success` | `AllocationAttribute` | Resolve the allocation's incident (assigned to the approver if a ticketing admin requested it) |
+| New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident, unless a ticketing admin submitted it |
+| Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
 | Allocation or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | Nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 
@@ -58,8 +58,8 @@ add, so the PI and Approvers aren't told about it. The next day's first change f
 **Adding or removing the PI files nothing.** Tufts' project-create view sends
 `project_activate_user` for the new project's PI, so without this every new project would get a
 notice that its users had changed. A PI isn't otherwise added to or removed from a project.
-Superusers are skipped too: they're staff, not project members to notify. See "Project user
-tickets" in `docs/plan.md`.
+Ticketing admins (see "Ticketing admins" below) are skipped too: they aren't project members
+to notify. See "Project user tickets" in `docs/plan.md`.
 
 Denials send no signal; their incidents stay open for admins to handle manually. Allocation renewals
 and account upgrade requests are unused at Tufts and out of scope. See "Out of scope" in
@@ -113,9 +113,20 @@ from coldfront.config.urls import urlpatterns
 urlpatterns.append(path("ticketing/", include("ticketing.urls")))
 ```
 
+### Ticketing admins
+
+The plugin's controls are for **ticketing admins**: superusers, and users granted the
+`ticketing.manage_ticketing` permission ("Can use the ServiceNow ticketing controls"), directly or
+through a group, in Django admin. Django's `is_staff` alone doesn't count. Ticketing admins:
+
+- get the ticketing switch, the ticket card and its link form;
+- can view filed tickets in Django admin (which itself admits only `is_staff` users);
+- open no ticket when they submit an allocation or change request (see the link form, below);
+- file no project user notice when they're added to or removed from a project.
+
 ### Admin ticketing switch
 
-Superusers get a "Tickets on / Tickets off" control in the menu bar. With it off, nothing they do
+Ticketing admins get a "Tickets on / Tickets off" control in the menu bar. With it off, nothing they do
 files or resolves a ticket, until they switch it back on or their session ends. The site's navbar
 template must include it, guarded so the template still renders where the plugin isn't installed:
 
@@ -130,7 +141,7 @@ The switch relies on simple-history's `HistoryRequestMiddleware`, which is in Co
 
 Each ticket the plugin files is recorded as a `FiledTicket` (run `manage.py migrate` after
 installing): the incident number and `sys_id`, what it's about, and when the plugin resolved it.
-Superusers can see them in two places:
+Ticketing admins can see them in two places:
 
 - **Django admin**, under Ticketing, read-only. This is the only place HPC account tickets show,
   since ColdFront has no page for a user.
@@ -148,12 +159,12 @@ Superusers can see them in two places:
   (by email or the portal). Give it the incident number and what it's for (the allocation request, a
   change request, or today's project user changes): ColdFront then resolves that incident instead of
   filing its own, and closes any incident it had already opened for the request as a duplicate.
-  The card shows for superusers even with no tickets, for the form.
+  The card shows for ticketing admins even with no tickets, for the form.
 
-  **Known issue:** an allocation or change request can only be linked after it's submitted, and
-  submitting already opens ColdFront's request ticket, which emails the PI and Approvers. Linking
-  closes that ticket as a duplicate, but the email has gone. See "Linking tickets filed in
-  ServiceNow" in `docs/plan.md` for a possible fix.
+  Requests submitted by ticketing admins open no ticket, since one would email
+  the PI and Approvers before the customer's ServiceNow ticket could be linked. They're still
+  resolved, assigned to the admin who approved them. See "Linking tickets filed in ServiceNow" in
+  `docs/plan.md`.
 
 Links are built from `SERVICENOW_URL` when shown, so they follow the instance the site is configured
 for. Records survive deleting what they're about (the link is cleared, the `correlation_id` stays).
@@ -167,6 +178,7 @@ ticketing/
   signals.py    requests, storage success, project user changes -> enqueue_ticket
   dispatch.py   enqueue_ticket: the one way tasks get queued; honours the admin switch
   toggle.py     the admin switch, kept in the session
+  permissions.py   is_ticketing_admin: superusers and holders of ticketing.manage_ticketing
   views.py, urls.py, context_processors.py   the menu-bar control (htmx)
   tasks.py      re-query by pk, build the incident payload, create or resolve via the API
   models.py     FiledTicket: each ticket filed, what it's about, and its ServiceNow link

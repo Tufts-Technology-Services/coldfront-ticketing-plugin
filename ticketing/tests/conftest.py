@@ -1,4 +1,5 @@
 import pytest
+from django.contrib.auth.models import Permission
 from django.contrib.sessions.backends.db import SessionStore
 from django.test import RequestFactory
 from simple_history.models import HistoricalRecords
@@ -20,6 +21,22 @@ def pi(django_user_model):
 @pytest.fixture
 def admin(django_user_model):
     return django_user_model.objects.create_superuser(username="admin01", email="admin01@example.edu", password="pw")
+
+
+@pytest.fixture
+def is_staff_user(django_user_model):
+    """A user with Django's is_staff and nothing more: not a ticketing admin."""
+    return django_user_model.objects.create_user(
+        username="staff01", email="staff01@example.edu", password="pw", is_staff=True
+    )
+
+
+@pytest.fixture
+def ticketing_admin(django_user_model):
+    """A user granted ticketing.manage_ticketing who is neither a superuser nor is_staff."""
+    user = django_user_model.objects.create_user(username="tadmin01", email="tadmin01@example.edu", password="pw")
+    user.user_permissions.add(Permission.objects.get(content_type__app_label="ticketing", codename="manage_ticketing"))
+    return django_user_model.objects.get(pk=user.pk)  # refetched: has_perm caches on the instance
 
 
 @pytest.fixture

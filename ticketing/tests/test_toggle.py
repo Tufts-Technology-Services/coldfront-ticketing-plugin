@@ -42,8 +42,19 @@ def test_enqueue_ticket_queues_nothing_for_an_admin_with_ticketing_off(
     assert queued == []
 
 
-def test_only_superusers_can_switch_ticketing_off(requestor, in_request, queued, django_capture_on_commit_callbacks):
-    # e.g. a former superuser whose session still carries the flag
+def test_ticketing_admins_who_arent_superusers_can_switch_ticketing_off(
+    ticketing_admin, in_request, queued, django_capture_on_commit_callbacks
+):
+    in_request(ticketing_admin, off=True)
+    enqueue(django_capture_on_commit_callbacks)
+
+    assert queued == []
+
+
+def test_only_ticketing_admins_can_switch_ticketing_off(
+    requestor, in_request, queued, django_capture_on_commit_callbacks
+):
+    # e.g. a former ticketing admin whose session still carries the flag
     in_request(requestor, off=True)
     enqueue(django_capture_on_commit_callbacks)
 
@@ -91,7 +102,14 @@ def test_toggle_flips_the_admins_switch_and_returns_the_control(admin, client):
     assert "Tickets on" in response.content.decode()
 
 
-def test_toggle_is_superusers_only(requestor, client):
+def test_ticketing_admins_can_use_the_toggle(ticketing_admin, client):
+    client.force_login(ticketing_admin)
+
+    assert htmx_post(client).status_code == 200
+    assert client.session[toggle.SESSION_KEY] is True
+
+
+def test_toggle_is_ticketing_admins_only(requestor, client):
     client.force_login(requestor)
 
     assert htmx_post(client).status_code == 403
@@ -140,8 +158,9 @@ def test_toggle_refuses_when_the_history_middleware_is_missing(admin, client, se
     assert "HistoryRequestMiddleware is not active" in caplog.text
 
 
-def test_context_processor_gives_superusers_their_switch(admin, client):
-    client.force_login(admin)
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+def test_context_processor_gives_ticketing_admins_their_switch(client, request, who):
+    client.force_login(request.getfixturevalue(who))
     htmx_post(client)
 
     response = client.get(reverse("home"))

@@ -5,7 +5,7 @@ from django.urls import reverse
 
 from ticketing import tasks
 from ticketing.allocation_updates import UnsupportedUpdate, describe_change
-from ticketing.client import Incident
+from ticketing.client import Incident, UnknownReference
 
 pytestmark = pytest.mark.django_db
 
@@ -331,6 +331,9 @@ class FakeServiceNow:
         found = self.incidents.get(correlation_id)
         return found[0] if found else None
 
+    def sys_id_for(self, table, column, value):
+        return f"<{table}.{column}={value}>"
+
     def create_incident(self, ticket):
         n = len(self.incidents) + 1
         incident = Incident(sys_id=f"i-{n}", number=f"INC{n:07d}", state=ticket.state or "2")
@@ -491,6 +494,116 @@ def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
     assert ticket["caller_id"] == "asmith02"  # no requestor: the PI
     assert ticket["u_action"] == "Activate/Setup/Install"
     assert "Path:" not in ticket["comments"]
+
+
+# -- Staff requests are assigned to the admin who approved them --------------------------------
+
+
+def submitted_by(in_request, submitter, pi):
+    """A storage allocation requested by `submitter`, recorded in its history as a view would."""
+    in_request(submitter)
+    allocation, _ = make_storage_allocation(pi)
+    allocation.status = f.AllocationStatusChoiceFactory(name="New")
+    allocation.save()
+    return allocation
+
+
+def set_status(in_request, user, obj, status):
+    in_request(user)
+    obj.status = status
+    obj.save()
+
+
+def test_an_admins_request_is_filed_resolved_and_assigned_to_the_admin_who_activated_it(
+    pi, ticketing_admin, admin, in_request, use_client
+):
+    allocation = submitted_by(in_request, ticketing_admin, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    snow = use_client(FakeServiceNow())
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    [(incident, ticket)] = snow.incidents.values()
+    assert incident.state == "6"
+    assert ticket["assigned_to"] == "admin01"
+
+
+def admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow, assigned_to=None):
+    """A change request a ticketing admin submitted and `admin` approved, with a linked open incident."""
+    in_request(ticketing_admin)
+    change = make_storage_change(pi)
+    set_status(in_request, admin, change, f.AllocationChangeStatusChoiceFactory(name="Approved"))
+    cid = f"coldfront:allocation-change:{change.pk}"
+    snow.incidents[cid] = (Incident("i-9", "INC0000009", "2", assigned_to=assigned_to), {})
+    return change, cid
+
+
+@pytest.mark.parametrize("assigned_to", [None, "u-someone"])
+def test_an_admins_requests_linked_incident_is_assigned_to_the_approver(
+    pi, ticketing_admin, admin, in_request, use_client, assigned_to
+):
+    snow = use_client(FakeServiceNow())
+    change, cid = admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow, assigned_to)
+
+    assert tasks.resolve_allocation_change_ticket(change.pk) == Incident("i-9", "INC0000009")
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert fields["assigned_to"] == "admin01"  # even over an assignee already set
+
+
+class NoSuchUser(FakeServiceNow):
+    """FakeServiceNow whose instance has no user `missing`, as ServiceNowClient reports it."""
+
+    def __init__(self, missing):
+        super().__init__()
+        self.missing = missing
+
+    def sys_id_for(self, table, column, value):
+        if value == self.missing:
+            raise UnknownReference(f"found no {table} with {column}={value}")
+        return super().sys_id_for(table, column, value)
+
+
+def test_an_approver_servicenow_doesnt_know_falls_back_to_the_service_account(
+    pi, ticketing_admin, admin, in_request, use_client, caplog
+):
+    snow = use_client(NoSuchUser("admin01"))
+    change, cid = admin_change_with_linked_incident(pi, ticketing_admin, admin, in_request, snow)
+
+    tasks.resolve_allocation_change_ticket(change.pk)
+
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert fields["assigned_to"] == "svc_test"
+    assert "ServiceNow has no user admin01" in caplog.text
+
+
+def test_the_latest_activation_is_the_one_that_counts(pi, ticketing_admin, admin, in_request, django_user_model):
+    allocation = submitted_by(in_request, ticketing_admin, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Inactive"))
+    other = django_user_model.objects.create_superuser(username="admin02", password="pw")
+    set_status(in_request, other, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    set_status(in_request, admin, allocation, allocation.status)  # an edit while Active isn't an activation
+
+    assert tasks.admin_request_approver(allocation, "Active") == "admin02"
+
+
+def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, in_request, use_client):
+    allocation = submitted_by(in_request, requestor, pi)
+    set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
+    snow = use_client(FakeServiceNow())
+
+    tasks.resolve_allocation_ticket(allocation.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["assigned_to"] == "svc_test"
+
+
+def test_without_history_users_there_is_no_approver(pi):
+    allocation, _ = make_storage_allocation(pi)  # saved outside a request
+
+    assert tasks.admin_request_approver(allocation, "Active") is None
 
 
 def test_activation_of_an_unsupported_allocation_leaves_its_incident_open(pi, use_client):

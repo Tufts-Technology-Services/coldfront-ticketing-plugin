@@ -354,7 +354,19 @@ def test_a_target_from_elsewhere_is_refused(pi, admin, client, snow):
     assert snow.updates == []
 
 
-def test_linking_is_superusers_only(pi, client, snow):
+def test_ticketing_admins_can_link(pi, ticketing_admin, client, snow):
+    allocation, _ = make_storage_allocation(pi)
+    client.force_login(ticketing_admin)
+
+    response = client.post(
+        link_url("allocation", allocation.pk),
+        {"number": "INC0000001", "target": f"coldfront:allocation:{allocation.pk}"},
+    )
+
+    assert response.status_code == 302
+
+
+def test_linking_is_ticketing_admins_only(pi, client, snow):
     allocation, _ = make_storage_allocation(pi)
     client.force_login(pi)
 

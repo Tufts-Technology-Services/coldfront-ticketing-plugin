@@ -1,6 +1,6 @@
 {% comment %}
-Menu-bar control for a superuser's ticketing switch. Include it guarded on the context processor's
-variable, so it renders only for superusers on sites with this plugin:
+Menu-bar control for a ticketing admin's switch. Include it guarded on the context processor's
+variable, so it renders only for ticketing admins on sites with this plugin:
   {% if ticketing_toggle %}{% include 'ticketing/navbar_toggle.html' %}{% endif %}
 {% endcomment %}
 <li id="navbar-ticketing" class="nav-item">

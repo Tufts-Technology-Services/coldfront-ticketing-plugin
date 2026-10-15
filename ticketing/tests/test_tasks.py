@@ -3,6 +3,7 @@ import datetime
 import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 
 from ticketing import tasks
 from ticketing.client import Incident
@@ -212,8 +213,13 @@ def test_group_membership_added_by_a_superuser_is_on_their_behalf(requestor, dja
     assert ticket.contact_type == "email"
 
 
-def test_group_membership_files_nothing_for_a_superuser(django_user_model, fake_client):
-    django_user_model.objects.create_superuser(username="jdoe01", email="jdoe01@example.edu", password="pw")
+@pytest.mark.parametrize("superuser", [True, False])
+def test_group_membership_files_nothing_for_ticketing_admins(django_user_model, fake_client, superuser):
+    user = django_user_model.objects.create_user(
+        username="jdoe01", email="jdoe01@example.edu", password="pw", is_superuser=superuser
+    )
+    if not superuser:
+        user.user_permissions.add(Permission.objects.get(codename="manage_ticketing"))
 
     assert add_to_group() is None
     assert fake_client.looked_up == [] and fake_client.created == []

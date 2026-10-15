@@ -223,11 +223,12 @@ def render_card(user, allocation):
 
 
 @override_settings(SERVICENOW_URL=SNOW)
-def test_superusers_see_linked_tickets(pi, admin):
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+def test_ticketing_admins_see_linked_tickets(pi, request, who):
     allocation, _ = make_storage_allocation(pi)
     file(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
 
-    html = render_card(admin, allocation)
+    html = render_card(request.getfixturevalue(who), allocation)
 
     assert "ServiceNow Tickets" in html
     assert f'href="{SNOW}/nav_to.do?uri=incident.do%3Fsys_id%3Dabc123"' in html

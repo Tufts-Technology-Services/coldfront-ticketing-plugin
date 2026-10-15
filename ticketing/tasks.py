@@ -48,9 +48,10 @@ from ticketing.allocation_updates import (
     describe_new_allocation,
     describe_request,
 )
-from ticketing.client import Incident, client_from_settings
+from ticketing.client import Incident, UnknownReference, client_from_settings
 from ticketing.models import FiledTicket
-from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, Ticket, clean_short_description
+from ticketing.permissions import is_ticketing_admin
+from ticketing.tickets import DEFAULT_BUSINESS_SERVICE, REFERENCE_FIELDS, Ticket, clean_short_description
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ def create_group_membership_ticket(
 
     Mirrors rt-ticket-utils' hpc_added_to_group_ticket_text: the notification covers the group
     directory, the user's own subdirectory and how to check access. See _group_ticket for who's
-    who, superusers and re-runs.
+    who, admins and re-runs.
     """
     return _group_ticket(
         change="add",
@@ -159,7 +160,7 @@ def create_group_removal_ticket(
     """File an already-resolved incident telling a user they've been removed from a project group.
 
     No rt-ticket-utils counterpart; the notification says which group and directory they've lost
-    access to. See _group_ticket for who's who, superusers and re-runs.
+    access to. See _group_ticket for who's who, admins and re-runs.
     """
     return _group_ticket(
         change="remove",
@@ -178,13 +179,13 @@ def _group_ticket(
 ) -> Incident | None:
     """File an already-resolved incident about `username` joining or leaving `group`.
 
-    Superusers get no ticket (returns None): they're staff, not customers of the group.
+    Ticketing admins get no ticket (returns None): they're staff, not customers of the group.
 
     The notification goes in the customer-visible `comments`, so ServiceNow emails the user, who is
     the caller. `requestor_username` is whoever asked for the change -- typically the PI or a
     manager; they become the contact person and are watch-listed. Without it the user stands in. A
-    superuser requestor is taken to be an administrator acting on someone's behalf (contact_type
-    email).
+    ticketing-admin requestor (ticketing.permissions) is taken to be an administrator acting on someone's behalf
+    (contact_type email).
 
     Group and paths are passed in by whatever made the change, so this plugin needn't know the
     cluster layout. Safe to re-run the same day: an incident already filed today for this change,
@@ -195,8 +196,8 @@ def _group_ticket(
     User = get_user_model()
     user = User.objects.get(username=username)
     what = f"group {change} of {user.username} in {group}"
-    if user.is_superuser:
-        logger.info("No incident for %s: superuser", what)
+    if is_ticketing_admin(user):
+        logger.info("No incident for %s: ticketing admin", what)
         return None
     requestor = User.objects.get(username=requestor_username) if requestor_username else user
     correlation_id = f"coldfront:group-{change}:{group}:{user.username}:{timezone.localdate().isoformat()}"
@@ -207,7 +208,7 @@ def _group_ticket(
         logger.info("Incident for %s already filed as %s", what, existing.number)
         return existing
 
-    on_behalf = requestor.pk != user.pk and requestor.is_superuser
+    on_behalf = requestor.pk != user.pk and is_ticketing_admin(requestor)
     ticket = Ticket(
         u_contact_person=requestor.username,
         caller_id=user.username,
@@ -329,6 +330,27 @@ def _people_fields(project, requestor_pk, affected_pk=None):
     return requestor, fields
 
 
+def admin_request_approver(request, approved_status) -> str | None:
+    """The UTLN of whoever approved `request`, if a ticketing admin submitted it; else None.
+
+    `request` is an Allocation or AllocationChangeRequest. Its simple-history rows record who made
+    each save (HistoryRequestMiddleware): the creation row names the submitter, and the latest row
+    where the status became `approved_status` the approver. Admins' requests open no ticket, and
+    their resolve is assigned to the approving admin rather than the integration account. None too
+    when a save happened outside a web request.
+    """
+    history = request.history.order_by("history_date", "history_id")
+    created = history.filter(history_type="+").select_related("history_user").first()
+    if created is None or not is_ticketing_admin(created.history_user):
+        return None
+    approver = previous = None
+    for status, username in history.values_list("status__name", "history_user__username"):
+        if status == approved_status and previous != approved_status:
+            approver = username
+        previous = status
+    return approver
+
+
 def _filed(correlation_id) -> Incident | None:
     """The incident recorded locally for `correlation_id`, if any, sparing a ServiceNow lookup."""
     filed = FiledTicket.objects.filter(correlation_id=correlation_id).first()
@@ -386,16 +408,20 @@ def _open_request(*, correlation_id, what, kind, subjects, people, describe, u_a
     return incident
 
 
-def _resolve_or_file(*, correlation_id, what, kind, subjects, people, describe, u_action) -> Incident | None:
+def _resolve_or_file(
+    *, correlation_id, what, kind, subjects, people, describe, u_action, assignee=None
+) -> Incident | None:
     """Resolve the request's incident with a customer message, or file one already resolved.
 
     `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
     so an open incident stays open for an admin. An incident that is already Resolved or Closed is
     left alone: `comments` is a journal, so re-posting would duplicate the message.
 
-    A resolved incident always has an assignee. Requests are opened unassigned, so one still
-    unassigned is assigned to TICKETING_ASSIGNED_TO as it is resolved; one an admin has picked up
-    keeps its assignee.
+    A resolved incident always has an assignee. `assignee()`, if given, returns a UTLN to assign it
+    to over any assignee it has (admin_request_approver), or None. Otherwise requests are opened
+    unassigned, so one still unassigned is assigned to TICKETING_ASSIGNED_TO as it is resolved, and
+    one an admin has picked up keeps its assignee. A UTLN ServiceNow doesn't know is logged, and
+    TICKETING_ASSIGNED_TO stands in.
 
     Unlike _open_request this always asks ServiceNow, for the incident's current state; the
     incident is recorded as a FiledTicket as for _open_request.
@@ -406,7 +432,6 @@ def _resolve_or_file(*, correlation_id, what, kind, subjects, people, describe, 
         logger.info("No customer message for %s: %s", what, e)
         return None
 
-    assignee = import_from_settings("TICKETING_ASSIGNED_TO")
     resolution = {
         "state": STATE_RESOLVED,
         "close_code": CLOSE_CODE_SOLVED_REMOTELY,
@@ -415,29 +440,38 @@ def _resolve_or_file(*, correlation_id, what, kind, subjects, people, describe, 
     }
     client = client_from_settings()
     existing = client.find_incident(correlation_id)
-    if existing:
-        if existing.state in (STATE_RESOLVED, STATE_CLOSED):
-            logger.info("Incident %s for %s is already resolved", existing.number, what)
-            _record(existing, correlation_id, kind, subjects)
-        else:
-            assignment = {} if existing.assigned_to else {"assigned_to": assignee}
-            client.update_incident(existing.sys_id, {**assignment, **resolution})
-            logger.info("Resolved %s for %s", existing.number, what)
-            _record(existing, correlation_id, kind, subjects, resolved=True)
+    if existing and existing.state in (STATE_RESOLVED, STATE_CLOSED):
+        logger.info("Incident %s for %s is already resolved", existing.number, what)
+        _record(existing, correlation_id, kind, subjects)
         return existing
 
-    _, people_fields = people()
-    ticket = Ticket(
-        **people_fields,
-        short_description=update.short_description,
-        u_business_service=update.business_service,
-        u_action=u_action,
-        assigned_to=assignee,
-        correlation_id=correlation_id,
-        **resolution,
-    )
-    incident = client.create_incident(ticket)
-    logger.info("Filed %s for %s", incident.number, what)
+    service_account = import_from_settings("TICKETING_ASSIGNED_TO")
+    chosen = assignee() if assignee else None
+    if chosen:
+        try:
+            client.sys_id_for(*REFERENCE_FIELDS["assigned_to"], chosen)  # cached for the payload
+        except UnknownReference:
+            logger.warning("ServiceNow has no user %s; assigning %s to %s", chosen, what, service_account)
+            chosen = service_account
+
+    if existing:
+        assignment = {"assigned_to": chosen or service_account} if chosen or not existing.assigned_to else {}
+        client.update_incident(existing.sys_id, {**assignment, **resolution})
+        logger.info("Resolved %s for %s", existing.number, what)
+        incident = existing
+    else:
+        _, people_fields = people()
+        ticket = Ticket(
+            **people_fields,
+            short_description=update.short_description,
+            u_business_service=update.business_service,
+            u_action=u_action,
+            assigned_to=chosen or service_account,
+            correlation_id=correlation_id,
+            **resolution,
+        )
+        incident = client.create_incident(ticket)
+        logger.info("Filed %s for %s", incident.number, what)
     _record(incident, correlation_id, kind, subjects, resolved=True)
     return incident
 
@@ -484,7 +518,8 @@ def resolve_allocation_ticket(
     The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
     is supported today, and anything else is left open for an admin. With no incident to resolve, a
     new one is filed already resolved. `requestor_pk` and `affected_pk` only matter then -- without
-    them the PI is the caller. Safe to re-run.
+    them the PI is the caller. If a ticketing admin submitted the request, it is assigned to the admin who
+    activated it (admin_request_approver). Safe to re-run.
     """
     allocation = _allocation(allocation_pk)
     return _resolve_or_file(
@@ -495,6 +530,7 @@ def resolve_allocation_ticket(
         people=lambda: _people_fields(allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_activation(allocation),
         u_action=U_ACTION_ACTIVATE,
+        assignee=lambda: admin_request_approver(allocation, "Active"),
     )
 
 
@@ -540,7 +576,8 @@ def resolve_allocation_change_ticket(
     The message depends on the allocation's resource (ticketing.allocation_updates); only Storage
     quota changes are supported today, and anything else is left open for an admin. With no
     incident to resolve, a new one is filed already resolved. `requestor_pk` and `affected_pk` only
-    matter then -- without them the PI is the caller. Safe to re-run.
+    matter then -- without them the PI is the caller. If a ticketing admin submitted the request, it is assigned
+    to the admin who approved it (admin_request_approver). Safe to re-run.
     """
     change = _change(allocation_change_pk)
     return _resolve_or_file(
@@ -551,4 +588,5 @@ def resolve_allocation_change_ticket(
         people=lambda: _people_fields(change.allocation.project, requestor_pk, affected_pk),
         describe=lambda: describe_change(change),
         u_action=U_ACTION_MOVE_ADD_CHANGE,
+        assignee=lambda: admin_request_approver(change, "Approved"),
     )

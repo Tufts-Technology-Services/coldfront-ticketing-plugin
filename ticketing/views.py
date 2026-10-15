@@ -14,19 +14,20 @@ from django.views import View
 from ticketing import toggle
 from ticketing.client import ServiceNowError
 from ticketing.linking import LinkError, link_targets, link_ticket
+from ticketing.permissions import is_ticketing_admin
 
 logger = logging.getLogger(__name__)
 
 
 class TicketingToggleView(LoginRequiredMixin, UserPassesTestMixin, View):
-    """Flip the acting superuser's ticketing switch.
+    """Flip the acting ticketing admin's switch.
 
     htmx posts here and swaps in the re-rendered menu-bar control; a plain form post is redirected
     back to the page it came from.
     """
 
     def test_func(self):
-        return self.request.user.is_superuser
+        return is_ticketing_admin(self.request.user)
 
     def post(self, request):
         if toggle.tracking_active(request):
@@ -58,7 +59,7 @@ class LinkTicketView(LoginRequiredMixin, UserPassesTestMixin, View):
     }
 
     def test_func(self):
-        return self.request.user.is_superuser
+        return is_ticketing_admin(self.request.user)
 
     def post(self, request, subject_type, pk):
         if subject_type not in self.SUBJECTS:

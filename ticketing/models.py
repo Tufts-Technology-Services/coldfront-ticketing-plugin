@@ -75,6 +75,9 @@ class FiledTicket(TimeStampedModel):
 
     class Meta:
         ordering = ["-created"]
+        # The plugin's one permission, checked by ticketing.permissions.is_ticketing_admin. It lives
+        # here because a permission needs a model; it isn't about FiledTicket rows.
+        permissions = [("manage_ticketing", "Can use the ServiceNow ticketing controls")]
 
     def __str__(self):
         return f"{self.number} ({self.correlation_id})"

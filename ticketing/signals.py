@@ -9,11 +9,11 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     quota_update_state saved as "success"                  resolve_allocation_change_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
-Requests open a ticket when they're submitted. They're resolved when the storage plugin reports its
-work done, not on approval (decided 2026-10-07): the plugin creates shares and sets quotas in
-background tasks after approval and records the outcome in those two allocation attributes, so
-resolving on approval could tell the customer "done" before -- or despite -- a failure. A failure
-leaves the ticket open for an admin.
+Requests open a ticket when they're submitted, unless a ticketing admin submitted them. They're resolved when
+the storage plugin reports its work done, not on approval (decided 2026-10-07): the plugin creates
+shares and sets quotas in background tasks after approval and records the outcome in those two
+allocation attributes, so resolving on approval could tell the customer "done" before -- or despite
+-- a failure. A failure leaves the ticket open for an admin.
 
 Approval (allocation_activate, allocation_change_approved) queues nothing, but it is the last moment
 the approving admin's request -- and so their ticketing switch -- is visible. If the switch is off,
@@ -44,12 +44,14 @@ from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
 from coldfront.core.utils.common import import_from_settings
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
+from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from ticketing import toggle
 from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME
 from ticketing.dispatch import enqueue_ticket
+from ticketing.permissions import is_ticketing_admin
 from ticketing.tasks import allocation_correlation_id, change_correlation_id
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,7 @@ SUCCESS = "success"
 SUPPRESSED_ATTRIBUTE = "ticketing_suppressed"
 
 
-def requestor_pk(kwargs):
+def requestor(kwargs):
     """Who submitted the request: `requestor_pk` if core sends it, else the logged-in user.
 
     Core doesn't send requestor_pk yet (docs/plan.md, A1). These signals are sent from inside the
@@ -71,9 +73,13 @@ def requestor_pk(kwargs):
     task falls back to the PI.
     """
     if kwargs.get("requestor_pk"):
-        return kwargs["requestor_pk"]
+        return get_user_model().objects.filter(pk=kwargs["requestor_pk"]).first()
     user = getattr(toggle.current_request(), "user", None)
-    return user.pk if user is not None and user.is_authenticated else None
+    return user if user is not None and user.is_authenticated else None
+
+
+def requestor_pk(kwargs):
+    return kwargs.get("requestor_pk") or getattr(requestor(kwargs), "pk", None)
 
 
 # -- Requests open tickets ----------------------------------------------------------------------
@@ -81,14 +87,27 @@ def requestor_pk(kwargs):
 
 @receiver(allocation_new, sender=AllocationCreateView, dispatch_uid="ticketing-allocation-new")
 def allocation_requested(sender, allocation_pk, **kwargs):
-    enqueue_ticket("ticketing.tasks.create_allocation_ticket", allocation_pk, requestor_pk=requestor_pk(kwargs))
+    open_request("ticketing.tasks.create_allocation_ticket", allocation_pk, kwargs)
 
 
 @receiver(allocation_change_created, sender=AllocationChangeView, dispatch_uid="ticketing-allocation-change-created")
 def allocation_change_requested(sender, allocation_pk, allocation_change_pk, **kwargs):
-    enqueue_ticket(
-        "ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, requestor_pk=requestor_pk(kwargs)
-    )
+    open_request("ticketing.tasks.create_allocation_change_ticket", allocation_change_pk, kwargs)
+
+
+def open_request(task, pk, kwargs):
+    """Queue the request's ticket, unless a ticketing admin (ticketing.permissions) submitted it.
+
+    Admins submit requests on a customer's behalf, usually for one the customer already asked for in
+    ServiceNow. A ticket opened now would email the PI and Approvers about a second ticket before
+    there's a request to link the original to (decided 2026-10-15). The resolve still goes out: it
+    resolves the ticket an admin linked, or with none, files one already resolved.
+    """
+    user = requestor(kwargs)
+    if is_ticketing_admin(user):
+        logger.info("Not opening a ticket for %s %s: requested by a ticketing admin (%s)", task, pk, user.username)
+        return
+    enqueue_ticket(task, pk, requestor_pk=getattr(user, "pk", None))
 
 
 # -- Approval records an admin's switch; storage success resolves -------------------------------
@@ -201,13 +220,13 @@ def project_users_changed(sender, project_user_pk, **kwargs):
     ColdFront sends one signal per user added or removed, so changing five users in one form sends
     five. The task's per-day correlation_id stops a second ticket only once the first is filed, and
     five tasks queued together could each look before any had filed; so within a request only the
-    first is queued. Superusers being added or removed are staff, not project members to notify,
-    and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
+    first is queued. Ticketing admins (ticketing.permissions) being added or removed aren't members to
+    notify, and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
     for the new project's PI, and a PI is never otherwise added or removed, so it would only ever
     tell a new project's PI that its users had changed.
     """
     project_user = ProjectUser.objects.select_related("user", "project").get(pk=project_user_pk)
-    if project_user.user.is_superuser or project_user.user_id == project_user.project.pi_id:
+    if is_ticketing_admin(project_user.user) or project_user.user_id == project_user.project.pi_id:
         return
     if not first_in_request(("project-users", project_user.project_id)):
         return

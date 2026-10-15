@@ -3,27 +3,27 @@ from django.urls import reverse
 
 from ticketing.linking import link_targets
 from ticketing.models import FiledTicket
+from ticketing.permissions import is_ticketing_admin
 
 register = template.Library()
 
 
-def _is_superuser(context):
-    user = getattr(context.get("request"), "user", None)
-    return bool(user and user.is_superuser)
+def _is_ticketing_admin(context):
+    return is_ticketing_admin(getattr(context.get("request"), "user", None))
 
 
 @register.simple_tag(takes_context=True)
 def filed_tickets_for(context, subject):
-    """The tickets filed about `subject` (an allocation, project or user), for superusers only."""
-    if not _is_superuser(context):
+    """The tickets filed about `subject` (an allocation, project or user), for ticketing admins only."""
+    if not _is_ticketing_admin(context):
         return FiledTicket.objects.none()
     return FiledTicket.objects.about(subject)
 
 
 @register.simple_tag(takes_context=True)
 def link_form_for(context, subject):
-    """Where the "Link ServiceNow ticket" form posts, and what it can link to; None for non-superusers."""
-    if not _is_superuser(context):
+    """Where the "Link ServiceNow ticket" form posts, and what it can link to; None for others."""
+    if not _is_ticketing_admin(context):
         return None
     subject_type = type(subject).__name__.lower()
     return {
