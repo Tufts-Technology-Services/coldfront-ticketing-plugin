@@ -12,6 +12,12 @@ from coldfront.core.allocation.views import (
     AllocationDetailView,
 )
 from coldfront.core.test_helpers import factories as f
+from coldfront_utils.signals import (
+    quota_update_failed,
+    quota_update_successful,
+    share_creation_failed,
+    share_creation_successful,
+)
 from simple_history.models import HistoricalRecords
 
 from ticketing.models import FiledTicket
@@ -36,15 +42,16 @@ def approve(change):
     return change
 
 
-def set_state(allocation, name, value):
-    """Save a storage-plugin state attribute the way coldfront_utils' update_allocation_attribute_value does."""
-    attr_type = f.AllocationAttributeTypeFactory(name=name, attribute_type=f.AAttributeTypeFactory(name="Text"))
-    attribute = allocation.allocationattribute_set.filter(allocation_attribute_type=attr_type).first()
-    if attribute:
-        attribute.value = value
-        attribute.save()
-    else:
-        f.AllocationAttributeFactory(allocation=allocation, allocation_attribute_type=attr_type, value=value)
+def storage_succeeded(allocation, *, quota=False):
+    """Send what the storage plugin sends when it has created a share (quota=True: set a quota)."""
+    signal = quota_update_successful if quota else share_creation_successful
+    signal.send(sender=None, allocation=allocation, result={"message": "successful:"})
+
+
+def storage_failed(allocation, message="", *, quota=False):
+    """Send what the storage plugin sends when a share creation (quota=True: quota update) fails."""
+    signal = quota_update_failed if quota else share_creation_failed
+    signal.send(sender=None, allocation=allocation, message=message, exception=None)
 
 
 # -- Requests open tickets ----------------------------------------------------------------------
@@ -146,7 +153,7 @@ def test_an_admins_request_is_still_resolved(pi, admin, in_request, queued, comm
         allocation_new.send(sender=AllocationCreateView, allocation_pk=allocation.pk)
 
     with committed():
-        set_state(allocation, "share_creation_state", "success")
+        storage_succeeded(allocation)
 
     assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
@@ -156,40 +163,41 @@ def test_an_admins_request_is_still_resolved(pi, admin, in_request, queued, comm
 
 def test_share_created_resolves_the_allocation_ticket(pi, queued, committed):
     allocation, _ = make_storage_allocation(pi)
-    with committed():
-        set_state(allocation, "share_creation_state", "pending")
-    assert queued == []
 
     with committed():
-        set_state(allocation, "share_creation_state", "success")
+        storage_succeeded(allocation)
 
     assert queued == [("ticketing.tasks.resolve_allocation_ticket", (allocation.pk,), {})]
 
 
-def test_a_pending_share_queues_nothing(pi, queued, committed):
+def test_saving_a_state_attribute_resolves_nothing(pi, queued, committed):
+    """Only the storage plugin's signals count, not an edit to the attribute it records its state in."""
     allocation, _ = make_storage_allocation(pi)
+    state_type = f.AllocationAttributeTypeFactory(
+        name="share_creation_state", attribute_type=f.AAttributeTypeFactory(name="Text")
+    )
 
     with committed():
-        set_state(allocation, "share_creation_state", "pending")
+        f.AllocationAttributeFactory(allocation=allocation, allocation_attribute_type=state_type, value="successful")
 
     assert queued == []
 
 
-@pytest.mark.parametrize("value", ["failed", "failed: missing information"])
-def test_a_failed_share_files_a_failure_ticket(pi, queued, committed, value):
+@pytest.mark.parametrize(("message", "state"), [("", "failed"), ("missing information", "failed: missing information")])
+def test_a_failed_share_files_a_failure_ticket(pi, queued, committed, message, state):
     allocation, _ = make_storage_allocation(pi)
 
     with committed():
-        set_state(allocation, "share_creation_state", value)
+        storage_failed(allocation, message)
 
-    assert queued == [("ticketing.tasks.file_storage_failure_ticket", (allocation.pk, None), {"state": value})]
+    assert queued == [("ticketing.tasks.file_storage_failure_ticket", (allocation.pk, None), {"state": state})]
 
 
 def test_a_failed_quota_change_files_a_failure_ticket_for_its_request(pi, queued, committed):
     change = approve(make_storage_change(pi, old="10", new="20"))
 
     with committed():
-        set_state(change.allocation, "quota_update_state", "failed")
+        storage_failed(change.allocation, quota=True)
 
     assert queued == [
         ("ticketing.tasks.file_storage_failure_ticket", (change.allocation.pk, change.pk), {"state": "failed"})
@@ -207,7 +215,7 @@ def test_success_after_a_failure_ticket_resolves_both(pi, queued, committed):
     )
 
     with committed():
-        set_state(allocation, "share_creation_state", "success")
+        storage_succeeded(allocation)
 
     assert queued == [
         ("ticketing.tasks.resolve_storage_failure_ticket", (allocation.pk, None), {}),
@@ -219,7 +227,7 @@ def test_quota_set_resolves_the_change_request_that_asked_for_it(pi, queued, com
     change = approve(make_storage_change(pi, old="10", new="20"))
 
     with committed():
-        set_state(change.allocation, "quota_update_state", "success")
+        storage_succeeded(change.allocation, quota=True)
 
     assert queued == [("ticketing.tasks.resolve_allocation_change_ticket", (change.pk,), {})]
 
@@ -238,28 +246,29 @@ def test_quota_set_picks_the_approved_request_for_the_value_now_in_place(pi, que
     )
 
     with committed():
-        set_state(change.allocation, "quota_update_state", "success")
+        storage_succeeded(change.allocation, quota=True)
 
     assert queued == [("ticketing.tasks.resolve_allocation_change_ticket", (change.pk,), {})]
+
+
+def test_a_failed_quota_with_no_change_request_files_nothing(pi, queued, committed):
+    """A quota edited directly has no request, so no ticket to be the failure's parent."""
+    allocation, _ = make_storage_allocation(pi)
+
+    with committed():
+        storage_failed(allocation, "VAST said no", quota=True)
+
+    assert queued == []
 
 
 def test_quota_edited_directly_resolves_nothing(pi, queued, committed, caplog):
     allocation, _ = make_storage_allocation(pi)
 
     with caplog.at_level("INFO", logger="ticketing.signals"), committed():
-        set_state(allocation, "quota_update_state", "success")
+        storage_succeeded(allocation, quota=True)
 
     assert queued == []
     assert "no approved change request" in caplog.text
-
-
-def test_other_attributes_saved_as_success_are_ignored(pi, queued, committed):
-    allocation, _ = make_storage_allocation(pi)
-
-    with committed():
-        set_state(allocation, "something_else_state", "success")
-
-    assert queued == []
 
 
 # -- What storage doesn't provision resolves on approval -----------------------------------------
@@ -366,7 +375,7 @@ def test_share_created_after_an_approval_with_ticketing_off_resolves_nothing(pi,
     del HistoricalRecords.context.request  # the storage plugin's background task has no request
 
     with committed():
-        set_state(allocation, "share_creation_state", "success")
+        storage_succeeded(allocation)
 
     assert queued == []
     assert markers(allocation) == []  # used up
@@ -381,9 +390,9 @@ def test_a_failure_after_an_approval_with_ticketing_off_files_nothing_and_keeps_
     del HistoricalRecords.context.request
 
     with committed():
-        set_state(allocation, "share_creation_state", "failed")
+        storage_failed(allocation)
     with committed():
-        set_state(allocation, "share_creation_state", "success")
+        storage_succeeded(allocation)
 
     assert queued == []  # the marker outlived the failure, and suppressed the success too
 
@@ -397,7 +406,7 @@ def test_quota_set_after_an_approval_with_ticketing_off_resolves_nothing(pi, adm
     del HistoricalRecords.context.request
 
     with committed():
-        set_state(change.allocation, "quota_update_state", "success")
+        storage_succeeded(change.allocation, quota=True)
 
     assert queued == []
     assert markers(change.allocation) == []
@@ -410,7 +419,7 @@ def test_a_marker_only_skips_its_own_request(pi, admin, in_request, queued, comm
     del HistoricalRecords.context.request
 
     with committed():
-        set_state(change.allocation, "quota_update_state", "success")  # resolves the change request
+        storage_succeeded(change.allocation, quota=True)  # resolves the change request
 
     assert queued == [("ticketing.tasks.resolve_allocation_change_ticket", (change.pk,), {})]
     assert markers(change.allocation) == [f"coldfront:allocation:{change.allocation.pk}"]

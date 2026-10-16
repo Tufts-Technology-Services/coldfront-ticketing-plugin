@@ -5,19 +5,20 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     event                                                  task
     allocation_new (AllocationCreateView)                  create_allocation_ticket
     allocation_change_created (AllocationChangeView)       create_allocation_change_ticket
-    share_creation_state saved as "success"                resolve_allocation_ticket
-    quota_update_state saved as "success"                  resolve_allocation_change_ticket
+    share_creation_successful                              resolve_allocation_ticket
+    quota_update_successful                                resolve_allocation_change_ticket
     allocation_activate, if storage won't provision        resolve_allocation_ticket
     allocation_change_approved, if storage won't apply it  resolve_allocation_change_ticket
-    either state saved as "failed..."                      file_storage_failure_ticket
-    either state saved as "success", after a failure       resolve_storage_failure_ticket
+    share_creation_failed, quota_update_failed             file_storage_failure_ticket
+    either success, after a failure                        resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
 
 Requests open a ticket when they're submitted, unless a ticketing admin submitted them. Requests the
 storage plugin provisions are resolved when it reports its work done, not on approval (decided
-2026-10-07): the plugin creates shares and sets quotas in background tasks after approval and
-records the outcome in those two allocation attributes, so resolving on approval could tell the
-customer "done" before -- or despite -- a failure. A failure leaves the request's ticket open, and
+2026-10-07): the plugin creates shares and sets quotas in background tasks after approval, and
+sends the outcome as coldfront_utils.signals' share_creation_successful/_failed and
+quota_update_successful/_failed, so resolving on approval could tell the customer "done" before --
+or despite -- a failure. A failure leaves the request's ticket open, and
 files an admin-only child ticket for it, resolved by a later success. Everything else -- other
 resource types, and Storage change requests that don't change the quota -- is resolved on approval
 (storage_will_provision decides; 2026-10-15).
@@ -56,10 +57,14 @@ from coldfront.core.allocation.views import (
 )
 from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
-from coldfront.core.utils.common import import_from_settings
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
+from coldfront_utils.signals import (
+    quota_update_failed,
+    quota_update_successful,
+    share_creation_failed,
+    share_creation_successful,
+)
 from django.contrib.auth import get_user_model
-from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from ticketing import toggle
@@ -71,12 +76,6 @@ from ticketing.slots import allocation_correlation_id, change_correlation_id, st
 
 logger = logging.getLogger(__name__)
 
-# The storage plugin's outcome attributes (its SHARE_CREATION_STATE_ATTRIBUTE_NAME and
-# QUOTA_UPDATE_STATE_ATTRIBUTE_NAME). Both are configurable there, so they are here too.
-SHARE_STATE_ATTRIBUTE = import_from_settings("TICKETING_SHARE_STATE_ATTRIBUTE", "share_creation_state")
-QUOTA_STATE_ATTRIBUTE = import_from_settings("TICKETING_QUOTA_STATE_ATTRIBUTE", "quota_update_state")
-SUCCESS = "success"
-FAILED = "failed"  # the storage plugin writes "failed" or "failed: <reason>"
 # Private allocation attribute: "an admin approved this with ticketing off; don't resolve it".
 SUPPRESSED_ATTRIBUTE = "ticketing_suppressed"
 
@@ -202,42 +201,54 @@ def is_suppressed(allocation_pk, correlation_id) -> bool:
     return _markers(allocation_pk, correlation_id).exists()
 
 
-@receiver(post_save, sender=AllocationAttribute, dispatch_uid="ticketing-storage-state")
-def storage_state_saved(sender, instance, **kwargs):
-    """Act on a storage job's outcome, unless its approver had ticketing off.
+@receiver(share_creation_successful, dispatch_uid="ticketing-share-created")
+def share_created(sender, allocation, **kwargs):
+    storage_job_succeeded(allocation.pk, quota=False)
 
-    A success resolves the request, and the job's failure ticket if one is open. A failure (a value
-    starting "failed") files an admin-only failure ticket, a child of the request's.
 
-    Fires on every allocation attribute save, so it bails on the value before touching the database.
-    The storage plugin only saves a state when it changes, so each success arrives once, and a
-    failure once per attempt.
+@receiver(quota_update_successful, dispatch_uid="ticketing-quota-set")
+def quota_set(sender, allocation, **kwargs):
+    storage_job_succeeded(allocation.pk, quota=True)
+
+
+@receiver(share_creation_failed, dispatch_uid="ticketing-share-failed")
+def share_failed(sender, allocation, message="", **kwargs):
+    storage_job_failed(allocation.pk, message, quota=False)
+
+
+@receiver(quota_update_failed, dispatch_uid="ticketing-quota-failed")
+def quota_failed(sender, allocation, message="", **kwargs):
+    storage_job_failed(allocation.pk, message, quota=True)
+
+
+def storage_job_request(allocation_pk, *, quota):
+    """The request a storage job carried out: (change_pk, correlation_id, resolve task, its pk), or None.
+
+    A share was created for the allocation's own request; a quota set, for the approved change request
+    that asked for the quota now in place. None when there's no such request, as for a quota edited
+    directly (AllocationAttributeEditView), which has no ticket.
     """
-    value = instance.value.strip()
-    if value != SUCCESS and not value.startswith(FAILED):
-        return
-    name = instance.allocation_attribute_type.name
-    allocation_pk = instance.allocation_id
-    if name == SHARE_STATE_ATTRIBUTE:
-        change_pk, correlation_id = None, allocation_correlation_id(allocation_pk)
-        resolve, pk = "ticketing.tasks.resolve_allocation_ticket", allocation_pk
-    elif name == QUOTA_STATE_ATTRIBUTE:
-        change_pk = applied_quota_change_pk(allocation_pk)
-        if change_pk is None:
-            logger.info("Quota set on allocation %s with no approved change request for it", allocation_pk)
-            return
-        correlation_id = change_correlation_id(change_pk)
-        resolve, pk = "ticketing.tasks.resolve_allocation_change_ticket", change_pk
-    else:
-        return
+    if not quota:
+        return (
+            None,
+            allocation_correlation_id(allocation_pk),
+            "ticketing.tasks.resolve_allocation_ticket",
+            allocation_pk,
+        )
+    change_pk = applied_quota_change_pk(allocation_pk)
+    if change_pk is None:
+        logger.info("Quota set on allocation %s with no approved change request for it", allocation_pk)
+        return None
+    return change_pk, change_correlation_id(change_pk), "ticketing.tasks.resolve_allocation_change_ticket", change_pk
 
-    if value != SUCCESS:
-        if is_suppressed(allocation_pk, correlation_id):
-            logger.info("Not filing a storage failure for %s: approved with ticketing off", correlation_id)
-            return
-        enqueue_ticket("ticketing.tasks.file_storage_failure_ticket", allocation_pk, change_pk, state=value)
-        return
 
+def storage_job_succeeded(allocation_pk, *, quota):
+    """Resolve the request, and its job's failure ticket if one is open, unless its approver had
+    ticketing off. The storage plugin sends one success per job."""
+    request = storage_job_request(allocation_pk, quota=quota)
+    if request is None:
+        return
+    change_pk, correlation_id, resolve, pk = request
     if take_suppression(allocation_pk, correlation_id):
         logger.info("Not resolving %s: approved with ticketing off", correlation_id)
         return
@@ -246,6 +257,21 @@ def storage_state_saved(sender, instance, **kwargs):
     ).exists():
         enqueue_ticket("ticketing.tasks.resolve_storage_failure_ticket", allocation_pk, change_pk)
     enqueue_ticket(resolve, pk)
+
+
+def storage_job_failed(allocation_pk, message, *, quota):
+    """File an admin-only failure ticket, a child of the request's, unless its approver had ticketing
+    off. Sent once per failed attempt; a repeat adds a work note to the same ticket."""
+    request = storage_job_request(allocation_pk, quota=quota)
+    if request is None:
+        return
+    change_pk, correlation_id, _, _ = request
+    if is_suppressed(allocation_pk, correlation_id):
+        logger.info("Not filing a storage failure for %s: approved with ticketing off", correlation_id)
+        return
+    # shown on the ticket as the job's state, in the "failed: <reason>" form earlier storage versions wrote
+    state = f"failed: {message}" if message else "failed"
+    enqueue_ticket("ticketing.tasks.file_storage_failure_ticket", allocation_pk, change_pk, state=state)
 
 
 def applied_quota_change_pk(allocation_pk):

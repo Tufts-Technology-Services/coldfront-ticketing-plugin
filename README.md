@@ -36,10 +36,10 @@ settings).
 | Event | Signal | Sender | Action |
 |---|---|---|---|
 | New allocation request | `allocation_new` | `AllocationCreateView` | Create incident, unless a ticketing admin submitted it |
-| Share created | `post_save`: `share_creation_state` = `success` | `AllocationAttribute` | Resolve the allocation's incident (assigned to the approver if a ticketing admin requested it) |
+| Share created | `share_creation_successful` | the storage task | Resolve the allocation's incident (assigned to the approver if a ticketing admin requested it) |
 | New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident, unless a ticketing admin submitted it |
-| Quota changed | `post_save`: `quota_update_state` = `success` | `AllocationAttribute` | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
-| Storage job failed | `post_save`: either state = `failed...` | `AllocationAttribute` | File an admin-only child of the request's incident; a later success resolves it |
+| Quota changed | `quota_update_successful` | the storage task | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
+| Storage job failed | `share_creation_failed`, `quota_update_failed` | the storage task | File an admin-only child of the request's incident; a later success resolves it |
 | Allocation activated, or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | If storage won't provision it (non-Storage resources; Storage changes with no quota change), resolve the request's incident with a generic message. Otherwise nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 
@@ -101,10 +101,6 @@ TICKETING_ASSIGNED_TO = "<service-account-utln>"  # assignee of resolved tickets
 # known terms their own way ("GPU", "FreeIPA"; see KNOWN_TERMS in ticketing/allocation_updates.py).
 # Add terms, or respell a default:
 # TICKETING_KNOWN_TERMS = ["NetApp", "SLURM"]
-# Only if the storage plugin's SHARE_CREATION_STATE_ATTRIBUTE_NAME / QUOTA_UPDATE_STATE_ATTRIBUTE_NAME
-# are overridden; these must match them.
-# TICKETING_SHARE_STATE_ATTRIBUTE = "share_creation_state"
-# TICKETING_QUOTA_STATE_ATTRIBUTE = "quota_update_state"
 
 # ServiceNow connection. Read credentials from the environment rather than committing them.
 SERVICENOW_URL = os.environ["SERVICENOW_URL"]

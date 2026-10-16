@@ -45,8 +45,8 @@ def file_storage_failure_ticket(
 ) -> IncidentRef | None:
     """Tell admins a storage job failed, in a ticket only admins are on.
 
-    `state` is the storage plugin's failed value (share_creation_state for an allocation,
-    quota_update_state for `allocation_change_pk`). The ticket is a child (parent) of the
+    `state` is what failed, as "failed" or "failed: <reason>" (the reason the storage plugin sent
+    with share_creation_failed for an allocation, quota_update_failed for `allocation_change_pk`). The ticket is a child (parent) of the
     request's incident -- ColdFront's own, or the customer's if an admin linked it -- or has no
     parent when there is none, as for a ticketing admin's unlinked request. The approving admin is
     caller and contact (TICKETING_ASSIGNED_TO if unknown), with no watch list, contact_type

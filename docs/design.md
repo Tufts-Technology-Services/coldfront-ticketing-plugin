@@ -90,16 +90,19 @@ request.
 
 ### Storage requests resolve when the storage job succeeds
 
-The storage plugin creates shares and sets quotas in background tasks after approval, and records
-each outcome in an allocation attribute (`share_creation_state`, `quota_update_state`). Resolving on
-approval could tell the customer "done" before, or despite, a failure, so the plugin resolves when
-that attribute becomes `success`, through a `post_save` receiver. The storage plugin saves the state
-only when it changes, so each success arrives once.
+The storage plugin creates shares and sets quotas in background tasks after approval. Resolving on
+approval could tell the customer "done" before, or despite, a failure, so the plugin resolves on the
+outcome the storage plugin sends when a job finishes: `share_creation_successful`,
+`quota_update_successful`, `share_creation_failed` or `quota_update_failed`, defined in coldfront-utils
+(`coldfront_utils.signals`) so that this plugin doesn't depend on the storage plugin. Each job sends
+one outcome; a retry it schedules for itself sends nothing until it finishes. The plugin used to watch
+the allocation attributes the storage plugin records its state in, which also let a hand edit of one
+resolve a ticket; now only a storage job can.
 
 ### What the storage plugin doesn't provision
 
 Allocations on other resource types, and Storage change requests that don't change the quota (an
-end-date extension, say), get no outcome attribute: the storage plugin does nothing for them.
+end-date extension, say), get no outcome signal: the storage plugin does nothing for them.
 They're resolved when approved (`allocation_activate`, `allocation_change_approved`) instead.
 
 `storage_will_provision` (`ticketing/allocation_updates.py`) decides which way a request goes, and

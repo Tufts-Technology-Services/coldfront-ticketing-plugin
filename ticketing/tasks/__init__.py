@@ -7,11 +7,11 @@
     create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
     create_project_users_ticket       project_(activate|remove)_user       coldfront:project-users:<pk>:<date>
     create_allocation_ticket          allocation_new                       coldfront:allocation:<pk>
-    resolve_allocation_ticket         share_creation_state = success       coldfront:allocation:<pk>
+    resolve_allocation_ticket         share_creation_successful            coldfront:allocation:<pk>
     create_allocation_change_ticket   allocation_change_created            coldfront:allocation-change:<pk>
-    resolve_allocation_change_ticket  quota_update_state = success         coldfront:allocation-change:<pk>
-    file_storage_failure_ticket       either state = failed...             <request's>:storage-failed
-    resolve_storage_failure_ticket    either state = success, after one    <request's>:storage-failed
+    resolve_allocation_change_ticket  quota_update_successful              coldfront:allocation-change:<pk>
+    file_storage_failure_ticket       share_creation_failed, quota_...     <request's>:storage-failed
+    resolve_storage_failure_ticket    either success, after a failure      <request's>:storage-failed
 
     * not triggered yet (see "Not yet wired up" in docs/design.md); the rest are wired up in
       ticketing.signals.
