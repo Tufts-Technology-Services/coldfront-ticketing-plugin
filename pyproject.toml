@@ -36,9 +36,6 @@ dev = [
     "factory-boy>=3.3.3",
     "ruff>=0.11.4",
     "responses>=0.26.3",
-    # ColdFront imports bibtexparser 1.x APIs (removed in 2.x) but PyPI coldfront doesn't pin it;
-    # matches the fork's lockfile. Only matters for tests that load the URLconf.
-    "bibtexparser>=1.4,<2",
 ]
 
 [tool.hatch.metadata]
