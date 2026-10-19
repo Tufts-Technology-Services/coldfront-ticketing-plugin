@@ -1,7 +1,7 @@
 """HPC account tickets: opened when the user has no UID yet, resolved when the account is created.
 
-create_hpc_account_ticket is queued by the hpc_account_requested receiver in ticketing/signals.py;
-resolve_hpc_account_ticket isn't triggered yet (see "Not yet wired up" in docs/design.md).
+create_hpc_account_ticket is queued by the hpc_account_requested receiver in ticketing/signals.py,
+and resolve_hpc_account_ticket by the hpc_account_provisioned one.
 """
 
 from django.contrib.auth import get_user_model

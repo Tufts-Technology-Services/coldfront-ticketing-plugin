@@ -13,6 +13,7 @@ from coldfront.core.allocation.views import (
 )
 from coldfront.core.test_helpers import factories as f
 from coldfront_utils.signals import (
+    hpc_account_provisioned,
     hpc_account_requested,
     quota_update_failed,
     quota_update_successful,
@@ -564,3 +565,12 @@ def test_an_account_awaiting_a_uid_opens_its_ticket(queued, committed):
         hpc_account_requested.send(sender=None, username="jdoe01")
 
     assert queued == [("ticketing.tasks.create_hpc_account_ticket", ("jdoe01",), {})]
+
+
+def test_a_provisioned_account_is_welcomed(queued, committed):
+    with committed():
+        hpc_account_provisioned.send(
+            sender=None, username="jdoe01", home_path="/cluster/home/jdoe01", scratch_path="/cluster/scratch/jdoe01"
+        )
+
+    assert queued == [("ticketing.tasks.resolve_hpc_account_ticket", ("jdoe01", "/cluster/home/jdoe01"), {})]
