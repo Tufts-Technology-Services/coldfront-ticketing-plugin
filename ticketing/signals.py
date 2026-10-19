@@ -12,6 +12,7 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     share_creation_failed, quota_update_failed             file_storage_failure_ticket
     either success, after a failure                        resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
+    hpc_account_requested (account signup, no UID yet)     create_hpc_account_ticket
 
 Requests open a ticket when they're submitted, unless a ticketing admin submitted them. Requests the
 storage plugin provisions are resolved when it reports its work done, not on approval (decided
@@ -59,6 +60,7 @@ from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
 from coldfront_utils.signals import (
+    hpc_account_requested,
     quota_update_failed,
     quota_update_successful,
     share_creation_failed,
@@ -295,6 +297,20 @@ def applied_quota_change_pk(allocation_pk):
         .values_list("allocation_change_request_id", flat=True)
         .first()
     )
+
+
+# -- HPC accounts: opened while one waits on a UID -----------------------------------------------
+
+
+@receiver(hpc_account_requested, dispatch_uid="ticketing-hpc-account-requested")
+def open_hpc_account_ticket(sender, username, **kwargs):
+    """Tell the user their HPC account request was received: an account was requested and isn't ready yet.
+
+    Sent once per account. Today's sender is the account signup plugin, from its worker, only when
+    the user had no UID and one has just been created; there's no request, so no ticketing switch to
+    consult. Resolving the ticket once the account exists isn't wired up yet.
+    """
+    enqueue_ticket("ticketing.tasks.create_hpc_account_ticket", username)
 
 
 # -- Project users: one notice per project, per day ---------------------------------------------

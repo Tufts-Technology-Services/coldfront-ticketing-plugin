@@ -42,6 +42,7 @@ settings).
 | Storage job failed | `share_creation_failed`, `quota_update_failed` | the storage task | File an admin-only child of the request's incident; a later success resolves it |
 | Allocation activated, or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | If storage won't provision it (non-Storage resources; Storage changes with no quota change), resolve the request's incident with a generic message. Otherwise nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
+| HPC account requested and not ready yet (today: the user had no UID) | `hpc_account_requested` | the account signup plugin's `create_home` | Open an incident telling the user their request was received and they'll hear when it's ready |
 
 A sender view also matches its subclasses: the storage plugin, for one, replaces
 `AllocationCreateView` with its own subclass, so matching the class exactly would depend on the

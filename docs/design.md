@@ -69,6 +69,7 @@ tasks and linking all use, so each kind of request is described in one place.
 | A request the storage plugin doesn't provision is approved | The incident is resolved with a generic customer message. |
 | The storage plugin reports a failure | An admin-only child ticket is filed. A later success resolves it too. |
 | A project's users change | One already-resolved notice per project per day. |
+| An HPC signup has to wait because the user had no UID | A ticket opens, telling the user their request was received. |
 
 ### Requests open on submission
 
@@ -129,6 +130,21 @@ nothing. Within one request only the first signal queues a task, since tasks que
 each look for the day's ticket before any had filed it. Changes to ticketing admins, and to the
 project's PI, file nothing.
 
+### HPC account tickets
+
+`hpc_account_requested` (`coldfront_utils.signals`) says an HPC account has been requested and can't
+be set up straight away, with the username and the home directory the account will have. It's
+generic, so other workflows can send it too. Today's sender is the account signup plugin's
+`create_home`, and only when the user has no UID: the campus UID service had none for them and has
+just created one. It isn't sent when a UID exists but hasn't reached the cluster yet, so it goes out
+once per account. It queues `create_hpc_account_ticket`, which opens a ticket with a generic message
+to the user, as a customer-visible comment that ServiceNow emails them: their request has been
+received, there will be a wait, and they'll hear again once the account has been provisioned. The
+ticket waits unassigned in the group queue, and doesn't need the home directory.
+
+Most users now get their UID when their ColdFront account is first created, before they sign up for
+HPC, so these tickets are uncommon.
+
 ### The admin switch
 
 Ticketing admins can switch ticketing off for their own actions, from the menu bar. It's kept in
@@ -148,9 +164,10 @@ place and files nothing.
 
 ### Not yet wired up
 
-- **HPC account tickets** (`ticketing/tasks/hpc_accounts.py`): an admin-facing ticket while an
-  account waits on a UID, and a welcome when it's created. How they're triggered (signals from an
-  account plugin, or that plugin calling the tasks directly) is undecided.
+- **Resolving HPC account tickets** (`resolve_hpc_account_ticket`): a welcome when the account is
+  created. It could hang off `hpc_account_provisioned` (coldfront-utils), which the account signup
+  plugin sends then, but that plugin already emails its own welcome on that signal, so one of the two
+  would have to go.
 - **Per-user group membership tickets** (`ticketing/tasks/groups.py`): a ticket for each user who
   joins or leaves a project's group. These are separate from the project user notices above, which
   are wired up and cover the same changes with one notice per project per day. The per-user tasks

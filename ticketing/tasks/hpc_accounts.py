@@ -1,6 +1,7 @@
 """HPC account tickets: opened when the user has no UID yet, resolved when the account is created.
 
-Not triggered yet (see "Not yet wired up" in docs/design.md).
+create_hpc_account_ticket is queued by the hpc_account_requested receiver in ticketing/signals.py;
+resolve_hpc_account_ticket isn't triggered yet (see "Not yet wired up" in docs/design.md).
 """
 
 from django.contrib.auth import get_user_model
@@ -34,22 +35,24 @@ def _hpc_account_people(user):
     }
 
 
-def create_hpc_account_ticket(username: str, home_path: str) -> IncidentRef:
-    """Open an incident for an HPC account that can't be created yet because the user has no UID.
+def create_hpc_account_ticket(username: str) -> IncidentRef:
+    """Open an incident for a requested HPC account that can't be set up straight away.
 
-    Admin-facing: says who signed up and that the account is waiting on a UID. Opened unassigned
-    with no state, so it waits New in the group queue. resolve_hpc_account_ticket finds it by the
-    shared correlation_id "coldfront:hpc-account:<utln>" once the account exists. `home_path` is the
-    user's cluster home directory, passed in by whatever provisions the account so this plugin
-    needn't know the cluster layout. Safe to re-run.
+    Tells the user, in a customer-visible comment that ServiceNow emails them, that their request has
+    been received, that there will be a wait, and that they'll hear again once the account has been
+    provisioned. The description holds the same generic text. Opened unassigned with no state, so it
+    waits New in the group queue. resolve_hpc_account_ticket finds it by the shared correlation_id
+    "coldfront:hpc-account:<utln>" once the account exists. Safe to re-run.
     """
     user = get_user_model().objects.get(username=username)
+    message = render_to_string("ticketing/hpc_account_request.txt", {"user": user})
     return open_ticket(
         hpc_account_slot(user),
         people=lambda: _hpc_account_people(user),
         describe=lambda requestor: RequestDescription(
-            short_description=f"HPC Account Creation | {home_path}",
-            description=render_to_string("ticketing/hpc_account_request.txt", {"user": user, "home_path": home_path}),
+            short_description="HPC Account Request",
+            description=message,
+            comments=message,
             business_service=DEFAULT_BUSINESS_SERVICE,
             u_action=U_ACTION_ACTIVATE,
         ),

@@ -55,26 +55,30 @@ pytestmark = pytest.mark.django_db
 # -- HPC accounts --------------------------------------------------------------------------------
 
 
-def test_account_waiting_on_a_uid_opens_an_incident_for_admins(requestor, fake_client):
-    incident = tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+def test_a_requested_account_opens_an_incident_telling_the_user(requestor, fake_client):
+    incident = tasks.create_hpc_account_ticket("jdoe01")
 
     assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
     assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.contact_type == "self-service"
     assert ticket.state is None and ticket.assigned_to is None  # waits New in the group queue
-    assert ticket.short_description == "HPC Account Creation | /cluster/home/jdoe01"
+    assert ticket.short_description == "HPC Account Request"
     assert ticket.correlation_id == "coldfront:hpc-account:jdoe01"
-    assert ticket.comments is None  # nothing customer-facing until the account exists
-    assert "waiting on a UID" in ticket.description
-    assert "jdoe01" in ticket.description and "/cluster/home/jdoe01" in ticket.description
+    # a customer-visible comment, which ServiceNow emails to the caller; the description matches
+    assert ticket.comments.startswith("Hello,")
+    assert "received your request for an HPC account" in ticket.comments
+    assert "wait" in ticket.comments and "follow-up" in ticket.comments
+    assert "Research Technology (RT)" in ticket.comments  # from partials/footer.txt
+    assert "&amp;" not in ticket.comments and "{%" not in ticket.comments
+    assert ticket.description == ticket.comments
 
 
 def test_account_waiting_on_a_uid_rerun_returns_the_existing_incident(requestor, use_client):
     existing = IncidentRef(sys_id="i-0", number="INC0000000", state="1")
     client = use_client(FakeClient(existing=existing))
 
-    assert tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01") == existing
+    assert tasks.create_hpc_account_ticket("jdoe01") == existing
     assert client.looked_up == ["coldfront:hpc-account:jdoe01"]
     assert client.created == []
 
@@ -125,7 +129,7 @@ def test_welcome_text_goes_in_the_customer_visible_comments(requestor, fake_clie
 def test_waiting_then_created_resolves_the_same_incident(requestor, use_client):
     snow = use_client(FakeServiceNow())
 
-    opened = tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+    opened = tasks.create_hpc_account_ticket("jdoe01")
     resolved = tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
     tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")  # re-run: already resolved
 
@@ -134,7 +138,7 @@ def test_waiting_then_created_resolves_the_same_incident(requestor, use_client):
     assert incident.state == "6"
     assert fields["assigned_to"] == "svc_test"
     assert fields["comments"].count("Hello,") == 1
-    assert "waiting on a UID" in fields["description"]  # the admin summary is kept
+    assert "received your request" in fields["description"]  # the request's description is kept
 
 
 def test_account_already_resolved_is_left_alone(requestor, use_client):
@@ -145,10 +149,13 @@ def test_account_already_resolved_is_left_alone(requestor, use_client):
     assert client.updated == [] and client.created == []
 
 
-@pytest.mark.parametrize("task", [tasks.create_hpc_account_ticket, tasks.resolve_hpc_account_ticket])
-def test_unknown_user_raises_before_calling_servicenow(fake_client, task):
+@pytest.mark.parametrize(
+    ("task", "args"),
+    [(tasks.create_hpc_account_ticket, ()), (tasks.resolve_hpc_account_ticket, ("/cluster/home/nobody",))],
+)
+def test_unknown_user_raises_before_calling_servicenow(fake_client, task, args):
     with pytest.raises(get_user_model().DoesNotExist):
-        task("nobody", "/cluster/home/nobody")
+        task("nobody", *args)
 
     assert fake_client.looked_up == [] and fake_client.created == []
 

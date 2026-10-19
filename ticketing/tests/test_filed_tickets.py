@@ -180,7 +180,7 @@ def test_a_change_request_is_recorded_against_the_change_and_its_allocation(pi, 
 
 
 def test_an_hpc_account_is_recorded_against_the_user(requestor, snow):
-    tasks.create_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
+    tasks.create_hpc_account_ticket("jdoe01")
     tasks.resolve_hpc_account_ticket("jdoe01", "/cluster/home/jdoe01")
 
     ticket = FiledTicket.objects.get()

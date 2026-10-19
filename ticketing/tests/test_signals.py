@@ -13,6 +13,7 @@ from coldfront.core.allocation.views import (
 )
 from coldfront.core.test_helpers import factories as f
 from coldfront_utils.signals import (
+    hpc_account_requested,
     quota_update_failed,
     quota_update_successful,
     share_creation_failed,
@@ -553,3 +554,14 @@ def test_admin_with_ticketing_off_queues_no_project_notice(lab, admin, in_reques
         add(lab, "u1")
 
     assert queued == []
+
+
+# -- HPC accounts ---------------------------------------------------------------------------------
+
+
+def test_an_account_awaiting_a_uid_opens_its_ticket(queued, committed):
+    with committed():
+        hpc_account_requested.send(sender=None, username="jdoe01", home_path="/cluster/home/jdoe01")
+
+    # home_path is for other receivers: the ticket's message doesn't need it
+    assert queued == [("ticketing.tasks.create_hpc_account_ticket", ("jdoe01",), {})]

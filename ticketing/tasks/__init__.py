@@ -1,7 +1,7 @@
 """Task functions that create and resolve ServiceNow incidents. Invoked via django_q async_task.
 
     task                              for                                  correlation_id
-    create_hpc_account_ticket         an HPC account waits on a UID *      coldfront:hpc-account:<utln>
+    create_hpc_account_ticket         hpc_account_requested             coldfront:hpc-account:<utln>
     resolve_hpc_account_ticket        an HPC account is created *          coldfront:hpc-account:<utln>
     create_group_membership_ticket    a user is added to a group *         coldfront:group-add:<group>:<utln>:<date>
     create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
