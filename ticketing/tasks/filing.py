@@ -115,6 +115,7 @@ def open_ticket(slot: TicketSlot, *, people, describe) -> IncidentRef:
         **people_fields,
         short_description=request.short_description,
         description=request.description,
+        comments=request.comments,
         u_business_service=request.business_service,
         u_action=request.u_action,
         # No assigned_to: the request waits in the assignment group's queue for an admin.

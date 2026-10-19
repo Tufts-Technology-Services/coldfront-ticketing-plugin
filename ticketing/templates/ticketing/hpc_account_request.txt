@@ -1,10 +1,9 @@
-{% autoescape off %}HPC account requested in ColdFront; waiting on a UID.
+{% autoescape off %}Hello,
 
-User:           {{ user.get_full_name|default:user.username }} ({{ user.username }})
-Email:          {{ user.email }}
-Home directory: {{ home_path }}
+We have received your request for an HPC account. Setting up a new account takes some time, so
+there will be a wait before you can use it. You will receive a follow-up message once your account
+has been provisioned.
 
-The user has no UID on the cluster yet, so their home directory couldn't be created. A UID has
-been requested and account creation will be retried. This incident is resolved, with the welcome
-message to the user, once the account is created. If it stays open, check the account_creation
-tasks in ColdFront's django-q admin.{% endautoescape %}
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

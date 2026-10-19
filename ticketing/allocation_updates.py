@@ -170,6 +170,8 @@ class RequestDescription:
     description: str  # admin-facing summary of what was asked for
     business_service: str
     u_action: str  # as for AllocationUpdate
+    # customer-visible journal entry posted when the ticket opens; ServiceNow emails it to the caller
+    comments: str | None = None
 
 
 def describe_new_allocation(allocation, requestor) -> RequestDescription:

@@ -12,6 +12,10 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     share_creation_failed, quota_update_failed             file_storage_failure_ticket
     either success, after a failure                        resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
+    hpc_account_requested (account signup, no UID yet)     create_hpc_account_ticket
+    hpc_account_provisioned (account signup)               resolve_hpc_account_ticket
+    hpc_account_provisioning_failed (account signup)       file_hpc_account_failure_ticket
+    hpc_account_provisioned, after a failure               resolve_hpc_account_failure_ticket
 
 Requests open a ticket when they're submitted, unless a ticketing admin submitted them. Requests the
 storage plugin provisions are resolved when it reports its work done, not on approval (decided
@@ -59,6 +63,9 @@ from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
 from coldfront_utils.attribute.attribute import create_allocation_attribute_type
 from coldfront_utils.signals import (
+    hpc_account_provisioned,
+    hpc_account_provisioning_failed,
+    hpc_account_requested,
     quota_update_failed,
     quota_update_successful,
     share_creation_failed,
@@ -72,7 +79,12 @@ from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME, storage_will_prov
 from ticketing.dispatch import enqueue_ticket
 from ticketing.models import FiledTicket
 from ticketing.permissions import is_ticketing_admin
-from ticketing.slots import allocation_correlation_id, change_correlation_id, storage_failure_correlation_id
+from ticketing.slots import (
+    allocation_correlation_id,
+    change_correlation_id,
+    hpc_account_failure_correlation_id,
+    storage_failure_correlation_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +307,43 @@ def applied_quota_change_pk(allocation_pk):
         .values_list("allocation_change_request_id", flat=True)
         .first()
     )
+
+
+# -- HPC accounts: opened while one waits on a UID -----------------------------------------------
+
+
+@receiver(hpc_account_requested, dispatch_uid="ticketing-hpc-account-requested")
+def open_hpc_account_ticket(sender, username, **kwargs):
+    """Tell the user their HPC account request was received: an account was requested and isn't ready yet.
+
+    Sent once per account. Today's sender is the account signup plugin, from its worker, only when
+    the user had no UID and one has just been created; there's no request, so no ticketing switch to
+    consult. hpc_account_provisioned resolves it, below.
+    """
+    enqueue_ticket("ticketing.tasks.create_hpc_account_ticket", username)
+
+
+@receiver(hpc_account_provisioned, dispatch_uid="ticketing-hpc-account-provisioned")
+def welcome_hpc_account(sender, username, home_path, **kwargs):
+    """Welcome the user to their new HPC account, in a customer-visible comment ServiceNow emails them.
+
+    Resolves the account's request ticket if one is waiting, or files one already resolved, the usual
+    case, since most users have a UID before they sign up. An earlier failure's ticket, if still open,
+    is resolved too. The account signup plugin sends this from its worker once the account is ready,
+    so there's no ticketing switch to consult.
+    """
+    if FiledTicket.objects.filter(
+        correlation_id=hpc_account_failure_correlation_id(username), resolved_at__isnull=True
+    ).exists():
+        enqueue_ticket("ticketing.tasks.resolve_hpc_account_failure_ticket", username)
+    enqueue_ticket("ticketing.tasks.resolve_hpc_account_ticket", username, home_path)
+
+
+@receiver(hpc_account_provisioning_failed, dispatch_uid="ticketing-hpc-account-provisioning-failed")
+def hpc_account_setup_failed(sender, username, message="", **kwargs):
+    """File an admin-only ticket for a failed HPC account setup, a child of the account's own ticket if
+    there is one. Sent once per failed attempt; a repeat adds a work note to the same ticket."""
+    enqueue_ticket("ticketing.tasks.file_hpc_account_failure_ticket", username, message)
 
 
 # -- Project users: one notice per project, per day ---------------------------------------------

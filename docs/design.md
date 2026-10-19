@@ -65,10 +65,13 @@ tasks and linking all use, so each kind of request is described in one place.
 | When | What happens |
 |---|---|
 | An allocation or change request is submitted | An incident opens, unassigned, with an admin-facing summary. Not if a ticketing admin submitted it (below). |
-| The storage plugin records that it provisioned the request | The incident is resolved with a customer message. |
+| The storage plugin reports that it provisioned the request | The incident is resolved with a customer message. |
 | A request the storage plugin doesn't provision is approved | The incident is resolved with a generic customer message. |
-| The storage plugin records a failure | An admin-only child ticket is filed. A later success resolves it too. |
+| The storage plugin reports a failure | An admin-only child ticket is filed. A later success resolves it too. |
 | A project's users change | One already-resolved notice per project per day. |
+| An HPC signup has to wait because the user had no UID | A ticket opens, telling the user their request was received. |
+| An HPC account is provisioned | The user is welcomed, and the request's ticket resolved (or one filed already resolved). |
+| Setting up an HPC account fails | An admin-only child ticket is filed. A later success resolves it too. |
 
 ### Requests open on submission
 
@@ -112,19 +115,51 @@ storage exists. Ideally the storage plugin would expose that rule itself.
 
 ### When a storage job fails
 
-A `failed…` state files a child of the request's incident (ServiceNow's `parent` field), with only
-the approving admin on it, so no customer is emailed. Its text is internal: what failed, the state
-value, the project and resource, and how to run the job again. There's one per request: a repeat
+A failure (`share_creation_failed` or `quota_update_failed`) files a child of the request's incident
+(ServiceNow's `parent` field), with only the approving admin on it, so no customer is emailed. Its
+text is internal: what failed, the reason the storage plugin gave, the project and resource, and how
+to run the job again. There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
 the request resolves the failure ticket too.
 
 ### Project user notices
 
 Adding or removing a project's users files one generic, already-resolved notice ("the users on your
-project have changed") per project per day, adds and removes together. Later changes that day file
+project have changed") per project per day, adds and removes together. ColdFront's
+`project_activate_user` and `project_remove_user` signals, from any sender, queue
+`create_project_users_ticket` (`ticketing/tasks/project_users.py`). Later changes that day file
 nothing. Within one request only the first signal queues a task, since tasks queued together could
 each look for the day's ticket before any had filed it. Changes to ticketing admins, and to the
 project's PI, file nothing.
+
+### HPC account tickets
+
+`hpc_account_requested` (`coldfront_utils.signals`) says an HPC account has been requested and can't
+be set up straight away, with the username. It's generic, so other workflows can send it too. Today's sender is the account signup plugin's
+`create_home`, and only when the user has no UID: the campus UID service had none for them and has
+just created one. It isn't sent when a UID exists but hasn't reached the cluster yet, so it goes out
+once per account. It queues `create_hpc_account_ticket`, which opens a ticket with a generic message
+to the user, as a customer-visible comment that ServiceNow emails them: their request has been
+received, there will be a wait, and they'll hear again once the account has been provisioned. The
+ticket waits unassigned in the group queue.
+
+Most users now get their UID when their ColdFront account is first created, before they sign up for
+HPC, so these tickets are uncommon.
+
+`hpc_account_provisioned` follows once the account is ready, with the username and the account's home
+and scratch paths. It queues `resolve_hpc_account_ticket`, which posts the welcome as a customer-visible
+comment and resolves the ticket, or, with no ticket waiting (the usual case), files one already
+resolved. So every new account gets the welcome from ServiceNow. The account signup plugin also emails
+its own welcome on that signal, through ColdFront's mail, but only where `EMAIL_ENABLED` is on; with it
+off, the ticket's comment is the only welcome.
+
+`hpc_account_provisioning_failed` works like a storage job's failure. The account signup plugin sends
+it when setting an account up fails, with the reason and the exception (none when the user couldn't
+be added to the access group), and still raises. It files an admin-only ticket, a child of the
+account's own ticket if it had to wait for a UID, with the service account as caller, so the user
+isn't emailed; its text says how to run account creation again. There's one per account
+(`coldfront:hpc-account:<username>:failed`): a repeat failure adds a work note, reopening the ticket if
+it was resolved, and the success that welcomes the user resolves it too.
 
 ### The admin switch
 
@@ -145,11 +180,11 @@ place and files nothing.
 
 ### Not yet wired up
 
-- **HPC account tickets** (`ticketing/tasks/hpc_accounts.py`): an admin-facing ticket while an
-  account waits on a UID, and a welcome when it's created. How they're triggered (signals from an
-  account plugin, or that plugin calling the tasks directly) is undecided.
-- **Group membership tickets** (`ticketing/tasks/groups.py`): per-user tickets when someone joins or
-  leaves a project's group. Unused; bursts of changes would be better batched into one ticket.
+- **Per-user group membership tickets** (`ticketing/tasks/groups.py`): a ticket for each user who
+  joins or leaves a project's group. These are separate from the project user notices above, which
+  are wired up and cover the same changes with one notice per project per day. The per-user tasks
+  were superseded by them and are unused; if per-user tickets come back, bursts of changes would be
+  better batched into one ticket.
 
 ## Who is on a ticket
 

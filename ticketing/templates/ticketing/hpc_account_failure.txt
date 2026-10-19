@@ -1,0 +1,13 @@
+{% autoescape off %}Setting up an HPC account failed in ColdFront. The user hasn't been told.
+
+User:     {{ user.get_full_name|default:user.username }} ({{ user.username }})
+Email:    {{ user.email|default:"(none)" }}
+Reason:   {{ reason|default:"(not given)" }}
+Request:  {% if parent %}{{ parent.number }}{% else %}(no ticket: the account didn't have to wait for a UID){% endif %}
+
+Account creation doesn't retry a failure. Fix the cause, then run it again, from a ColdFront shell:
+
+    from account_signup.tasks import provision_hpc_account
+    provision_hpc_account("{{ user.username }}")
+
+When it succeeds, ColdFront welcomes the user and resolves this ticket.{% endautoescape %}

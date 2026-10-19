@@ -13,6 +13,9 @@ from coldfront.core.allocation.views import (
 )
 from coldfront.core.test_helpers import factories as f
 from coldfront_utils.signals import (
+    hpc_account_provisioned,
+    hpc_account_provisioning_failed,
+    hpc_account_requested,
     quota_update_failed,
     quota_update_successful,
     share_creation_failed,
@@ -553,3 +556,49 @@ def test_admin_with_ticketing_off_queues_no_project_notice(lab, admin, in_reques
         add(lab, "u1")
 
     assert queued == []
+
+
+# -- HPC accounts ---------------------------------------------------------------------------------
+
+
+def test_an_account_awaiting_a_uid_opens_its_ticket(queued, committed):
+    with committed():
+        hpc_account_requested.send(sender=None, username="jdoe01")
+
+    assert queued == [("ticketing.tasks.create_hpc_account_ticket", ("jdoe01",), {})]
+
+
+def test_a_provisioned_account_is_welcomed(queued, committed):
+    with committed():
+        hpc_account_provisioned.send(
+            sender=None, username="jdoe01", home_path="/cluster/home/jdoe01", scratch_path="/cluster/scratch/jdoe01"
+        )
+
+    assert queued == [("ticketing.tasks.resolve_hpc_account_ticket", ("jdoe01", "/cluster/home/jdoe01"), {})]
+
+
+def test_a_failed_account_setup_files_a_failure_ticket(queued, committed):
+    with committed():
+        hpc_account_provisioning_failed.send(sender=None, username="jdoe01", message="pyinfra failed", exception=None)
+
+    assert queued == [("ticketing.tasks.file_hpc_account_failure_ticket", ("jdoe01", "pyinfra failed"), {})]
+
+
+def test_a_provisioned_account_also_resolves_an_open_failure_ticket(requestor, queued, committed):
+    FiledTicket.objects.create(
+        correlation_id="coldfront:hpc-account:jdoe01:failed",
+        kind=FiledTicket.Kind.HPC_ACCOUNT_FAILURE,
+        number="INC0000003",
+        sys_id="i-3",
+        user=requestor,
+    )
+
+    with committed():
+        hpc_account_provisioned.send(
+            sender=None, username="jdoe01", home_path="/cluster/home/jdoe01", scratch_path="/cluster/scratch/jdoe01"
+        )
+
+    assert queued == [
+        ("ticketing.tasks.resolve_hpc_account_failure_ticket", ("jdoe01",), {}),
+        ("ticketing.tasks.resolve_hpc_account_ticket", ("jdoe01", "/cluster/home/jdoe01"), {}),
+    ]
