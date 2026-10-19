@@ -44,6 +44,7 @@ settings).
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
 | HPC account requested and not ready yet (today: the user had no UID) | `hpc_account_requested` | the account signup plugin's `create_home` | Open an incident telling the user their request was received and they'll hear when it's ready |
 | HPC account provisioned | `hpc_account_provisioned` | the account signup plugin's `create_home` | Welcome the user and resolve the request's incident, or file one already resolved |
+| HPC account setup failed | `hpc_account_provisioning_failed` | the account signup plugin's `create_home` | File an admin-only child of the account's incident; a later success resolves it |
 
 A sender view also matches its subclasses: the storage plugin, for one, replaces
 `AllocationCreateView` with its own subclass, so matching the class exactly would depend on the

@@ -40,6 +40,7 @@ class FiledTicket(TimeStampedModel):
         ALLOCATION = "allocation", "Allocation request"
         ALLOCATION_CHANGE = "allocation-change", "Allocation change request"
         HPC_ACCOUNT = "hpc-account", "HPC account"
+        HPC_ACCOUNT_FAILURE = "hpc-account-failure", "HPC account setup failed"
         PROJECT_USERS = "project-users", "Project users changed"
         STORAGE_FAILURE = "storage-failure", "Storage job failed"
 

@@ -152,3 +152,21 @@ def hpc_account_slot(user) -> TicketSlot:
         kind=FiledTicket.Kind.HPC_ACCOUNT,
         subjects={"user": user},
     )
+
+
+HPC_ACCOUNT_FAILURE_SUFFIX = ":failed"
+
+
+def hpc_account_failure_correlation_id(username) -> str:
+    return f"{hpc_account_correlation_id(username)}{HPC_ACCOUNT_FAILURE_SUFFIX}"
+
+
+def hpc_account_failure_slot(user) -> TicketSlot:
+    """The admin-only ticket filed when setting up `user`'s HPC account fails
+    (file_hpc_account_failure_ticket), a child of the account's own ticket if there is one."""
+    return TicketSlot(
+        correlation_id=hpc_account_failure_correlation_id(user.username),
+        what=f"setting up HPC account {user.username}",
+        kind=FiledTicket.Kind.HPC_ACCOUNT_FAILURE,
+        subjects={"user": user},
+    )

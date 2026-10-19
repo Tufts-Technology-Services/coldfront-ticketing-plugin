@@ -71,6 +71,7 @@ tasks and linking all use, so each kind of request is described in one place.
 | A project's users change | One already-resolved notice per project per day. |
 | An HPC signup has to wait because the user had no UID | A ticket opens, telling the user their request was received. |
 | An HPC account is provisioned | The user is welcomed, and the request's ticket resolved (or one filed already resolved). |
+| Setting up an HPC account fails | An admin-only child ticket is filed. A later success resolves it too. |
 
 ### Requests open on submission
 
@@ -151,6 +152,14 @@ comment and resolves the ticket, or, with no ticket waiting (the usual case), fi
 resolved. So every new account gets the welcome from ServiceNow. The account signup plugin also emails
 its own welcome on that signal, through ColdFront's mail, but only where `EMAIL_ENABLED` is on; with it
 off, the ticket's comment is the only welcome.
+
+`hpc_account_provisioning_failed` works like a storage job's failure. The account signup plugin sends
+it when setting an account up fails, with the reason and the exception (none when the user couldn't
+be added to the access group), and still raises. It files an admin-only ticket, a child of the
+account's own ticket if it had to wait for a UID, with the service account as caller, so the user
+isn't emailed; its text says how to run account creation again. There's one per account
+(`coldfront:hpc-account:<username>:failed`): a repeat failure adds a work note, reopening the ticket if
+it was resolved, and the success that welcomes the user resolves it too.
 
 ### The admin switch
 

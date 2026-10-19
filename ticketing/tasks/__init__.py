@@ -3,6 +3,8 @@
     task                              for                                  correlation_id
     create_hpc_account_ticket         hpc_account_requested                coldfront:hpc-account:<utln>
     resolve_hpc_account_ticket        hpc_account_provisioned              coldfront:hpc-account:<utln>
+    file_hpc_account_failure_ticket   hpc_account_provisioning_failed      coldfront:hpc-account:<utln>:failed
+    resolve_hpc_account_failure_...   hpc_account_provisioned, after one   coldfront:hpc-account:<utln>:failed
     create_group_membership_ticket    a user is added to a group *         coldfront:group-add:<group>:<utln>:<date>
     create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
     create_project_users_ticket       project_(activate|remove)_user       coldfront:project-users:<pk>:<date>
@@ -53,7 +55,12 @@ from ticketing.tasks.allocations import (
     resolve_allocation_ticket,
 )
 from ticketing.tasks.groups import create_group_membership_ticket, create_group_removal_ticket
-from ticketing.tasks.hpc_accounts import create_hpc_account_ticket, resolve_hpc_account_ticket
+from ticketing.tasks.hpc_accounts import (
+    create_hpc_account_ticket,
+    file_hpc_account_failure_ticket,
+    resolve_hpc_account_failure_ticket,
+    resolve_hpc_account_ticket,
+)
 from ticketing.tasks.project_users import create_project_users_ticket
 from ticketing.tasks.storage_failures import file_storage_failure_ticket, resolve_storage_failure_ticket
 
@@ -63,10 +70,12 @@ __all__ = [
     "create_group_membership_ticket",
     "create_group_removal_ticket",
     "create_hpc_account_ticket",
+    "file_hpc_account_failure_ticket",
     "create_project_users_ticket",
     "file_storage_failure_ticket",
     "resolve_allocation_change_ticket",
     "resolve_allocation_ticket",
+    "resolve_hpc_account_failure_ticket",
     "resolve_hpc_account_ticket",
     "resolve_storage_failure_ticket",
 ]
