@@ -133,14 +133,14 @@ project's PI, file nothing.
 ### HPC account tickets
 
 `hpc_account_requested` (`coldfront_utils.signals`) says an HPC account has been requested and can't
-be set up straight away, with the username and the home directory the account will have. It's
+be set up straight away, with the username. It's
 generic, so other workflows can send it too. Today's sender is the account signup plugin's
 `create_home`, and only when the user has no UID: the campus UID service had none for them and has
 just created one. It isn't sent when a UID exists but hasn't reached the cluster yet, so it goes out
 once per account. It queues `create_hpc_account_ticket`, which opens a ticket with a generic message
 to the user, as a customer-visible comment that ServiceNow emails them: their request has been
 received, there will be a wait, and they'll hear again once the account has been provisioned. The
-ticket waits unassigned in the group queue, and doesn't need the home directory.
+ticket waits unassigned in the group queue.
 
 Most users now get their UID when their ColdFront account is first created, before they sign up for
 HPC, so these tickets are uncommon.
@@ -166,7 +166,7 @@ place and files nothing.
 
 - **Resolving HPC account tickets** (`resolve_hpc_account_ticket`): a welcome when the account is
   created. It could hang off `hpc_account_provisioned` (coldfront-utils), which the account signup
-  plugin sends then, but that plugin already emails its own welcome on that signal, so one of the two
+  plugin sends then, with the username and the account's home and scratch paths, but that plugin already emails its own welcome on that signal, so one of the two
   would have to go.
 - **Per-user group membership tickets** (`ticketing/tasks/groups.py`): a ticket for each user who
   joins or leaves a project's group. These are separate from the project user notices above, which

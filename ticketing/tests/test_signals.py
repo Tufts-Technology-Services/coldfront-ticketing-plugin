@@ -561,7 +561,6 @@ def test_admin_with_ticketing_off_queues_no_project_notice(lab, admin, in_reques
 
 def test_an_account_awaiting_a_uid_opens_its_ticket(queued, committed):
     with committed():
-        hpc_account_requested.send(sender=None, username="jdoe01", home_path="/cluster/home/jdoe01")
+        hpc_account_requested.send(sender=None, username="jdoe01")
 
-    # home_path is for other receivers: the ticket's message doesn't need it
     assert queued == [("ticketing.tasks.create_hpc_account_ticket", ("jdoe01",), {})]
