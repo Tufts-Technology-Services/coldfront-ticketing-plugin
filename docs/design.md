@@ -65,9 +65,9 @@ tasks and linking all use, so each kind of request is described in one place.
 | When | What happens |
 |---|---|
 | An allocation or change request is submitted | An incident opens, unassigned, with an admin-facing summary. Not if a ticketing admin submitted it (below). |
-| The storage plugin records that it provisioned the request | The incident is resolved with a customer message. |
+| The storage plugin reports that it provisioned the request | The incident is resolved with a customer message. |
 | A request the storage plugin doesn't provision is approved | The incident is resolved with a generic customer message. |
-| The storage plugin records a failure | An admin-only child ticket is filed. A later success resolves it too. |
+| The storage plugin reports a failure | An admin-only child ticket is filed. A later success resolves it too. |
 | A project's users change | One already-resolved notice per project per day. |
 
 ### Requests open on submission
@@ -112,16 +112,19 @@ storage exists. Ideally the storage plugin would expose that rule itself.
 
 ### When a storage job fails
 
-A `failed…` state files a child of the request's incident (ServiceNow's `parent` field), with only
-the approving admin on it, so no customer is emailed. Its text is internal: what failed, the state
-value, the project and resource, and how to run the job again. There's one per request: a repeat
+A failure (`share_creation_failed` or `quota_update_failed`) files a child of the request's incident
+(ServiceNow's `parent` field), with only the approving admin on it, so no customer is emailed. Its
+text is internal: what failed, the reason the storage plugin gave, the project and resource, and how
+to run the job again. There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
 the request resolves the failure ticket too.
 
 ### Project user notices
 
 Adding or removing a project's users files one generic, already-resolved notice ("the users on your
-project have changed") per project per day, adds and removes together. Later changes that day file
+project have changed") per project per day, adds and removes together. ColdFront's
+`project_activate_user` and `project_remove_user` signals, from any sender, queue
+`create_project_users_ticket` (`ticketing/tasks/project_users.py`). Later changes that day file
 nothing. Within one request only the first signal queues a task, since tasks queued together could
 each look for the day's ticket before any had filed it. Changes to ticketing admins, and to the
 project's PI, file nothing.
@@ -148,8 +151,11 @@ place and files nothing.
 - **HPC account tickets** (`ticketing/tasks/hpc_accounts.py`): an admin-facing ticket while an
   account waits on a UID, and a welcome when it's created. How they're triggered (signals from an
   account plugin, or that plugin calling the tasks directly) is undecided.
-- **Group membership tickets** (`ticketing/tasks/groups.py`): per-user tickets when someone joins or
-  leaves a project's group. Unused; bursts of changes would be better batched into one ticket.
+- **Per-user group membership tickets** (`ticketing/tasks/groups.py`): a ticket for each user who
+  joins or leaves a project's group. These are separate from the project user notices above, which
+  are wired up and cover the same changes with one notice per project per day. The per-user tasks
+  were superseded by them and are unused; if per-user tickets come back, bursts of changes would be
+  better batched into one ticket.
 
 ## Who is on a ticket
 
