@@ -13,10 +13,12 @@ share; a quota change) gets the storage messages, and everything else the generi
 is the first template that exists of
 
     ticketing/<folder>/<resource name>.txt
+    ticketing/<folder>/<the resource it's an alias of>.txt   (TICKETING_RESOURCE_TEMPLATE_ALIASES)
     ticketing/<folder>/<resource type>.txt
     ticketing/<folder>/generic.txt
 
-(names slugified). Folders: allocation_new/ for activations, allocation_update/ for quota changes and
+(names slugified). An alias lets resources that are variants of another -- a staff or course copy of
+a storage tier, say -- share its templates, without a copy of each under every name. Folders: allocation_new/ for activations, allocation_update/ for quota changes and
 allocation_change/ for every other change, so a Storage change with no quota change never picks up
 allocation_update/storage.txt, which is about the quota. A resource that needs its own wording --
 e.g. HPC vs RStore storage, or a cluster -- gets a template named after it or its type. Only an
@@ -41,7 +43,14 @@ from ticketing.tickets import (
 # The one supported update today. Matches the storage plugin's QUOTA_ATTRIBUTE_NAME default.
 QUOTA_ATTRIBUTE_NAME = "Storage Quota (TB)"
 QUOTA_UNITS = "TB"
+# The path customers use: the cluster path on HPC storage, the SMB URL (smb://...) on RStore.
 PATH_ATTRIBUTE_NAME = "Storage Path"
+# RStore's SMB path in Windows form (\\server\share$).
+WINDOWS_PATH_ATTRIBUTE_NAME = "Storage Path (Windows)"
+# The storage plugin's group attribute (its GROUP_ATTRIBUTE_NAME default), on the allocation or else
+# the project. A course's admin group is this name plus ADMIN_GROUP_SUFFIX (create_course_folders).
+GROUP_ATTRIBUTE_NAME = "Group"
+ADMIN_GROUP_SUFFIX = "admin"
 
 
 # ServiceNow business service per resource type; types not listed keep the ServiceNowIncident default (HPC).
@@ -170,8 +179,21 @@ class RequestDescription:
     description: str  # admin-facing summary of what was asked for
     business_service: str
     u_action: str  # as for AllocationUpdate
-    # customer-visible journal entry posted when the ticket opens; ServiceNow emails it to the caller
+    # customer-visible journal entry posted when the ticket opens; ServiceNow emails it to the contact
+    # person and the watch list
     comments: str | None = None
+
+
+def person_label(user) -> str:
+    """'Full Name (utln)', or the UTLN twice for a user without a name."""
+    return f"{user.get_full_name() or user.username} ({user.username})"
+
+
+def aligned_rows(rows) -> list[str]:
+    """`(label, value)` pairs as "Label:  value" lines, values lined up in one column, at least as
+    far in as the other request fields ("Requested by: ")."""
+    width = max([len("Requested by:"), *(len(label) + 1 for label, _ in rows)]) + 1
+    return [f"{label + ':':<{width}}{value}" for label, value in rows]
 
 
 def describe_new_allocation(allocation, requestor) -> RequestDescription:
@@ -185,13 +207,21 @@ def describe_new_allocation(allocation, requestor) -> RequestDescription:
         summary += f" | {quota} {QUOTA_UNITS}"
     summary += f" | {allocation.project.title}"
 
+    pi = allocation.project.pi
+    details = [
+        ("Project", allocation.project.title),
+        ("PI", person_label(pi)),
+        ("Requested by", person_label(requestor)),
+        ("Resource", resource.name if resource else "(none)"),
+        *((a["name"], a["value"]) for a in _public_attributes(allocation)),
+    ]
     context = {
         "allocation": allocation,
         "project": allocation.project,
-        "pi": allocation.project.pi,
+        "pi": pi,
         "requestor": requestor,
         "resource": resource,
-        "attributes": _public_attributes(allocation),
+        "details": aligned_rows(details),
         "url": build_link(allocation.get_absolute_url()),
     }
     return RequestDescription(
@@ -281,10 +311,25 @@ def _business_service(resource) -> str:
 
 
 def _render(folder, resource, context) -> str:
-    """The first of `<folder>/<resource name>.txt`, `<folder>/<resource type>.txt` and
-    `<folder>/generic.txt` (slugified) that exists."""
-    names = [slugify(resource.name), slugify(resource.resource_type.name), "generic"]
-    return render_to_string([f"ticketing/{folder}/{name}.txt" for name in names], context)
+    """The first of `<folder>/<resource name>.txt`, `<folder>/<alias>.txt`, `<folder>/<resource
+    type>.txt` and `<folder>/generic.txt` (slugified) that exists. The alias is the resource name
+    TICKETING_RESOURCE_TEMPLATE_ALIASES gives for this one, if any."""
+    alias = getattr(settings, "TICKETING_RESOURCE_TEMPLATE_ALIASES", {}).get(resource.name)
+    names = [resource.name, alias, resource.resource_type.name]
+    slugs = [*dict.fromkeys(slugify(name) for name in names if name), "generic"]
+    return render_to_string([f"ticketing/{folder}/{slug}.txt" for slug in slugs], context)
+
+
+def allocation_group(allocation) -> str | None:
+    """The group the storage plugin gives `allocation`'s storage: its Group attribute, else its
+    project's (as the storage plugin's get_allocation_group). None without either."""
+    group = allocation.get_attribute(GROUP_ATTRIBUTE_NAME)
+    if not group:
+        project_attribute = allocation.project.projectattribute_set.filter(
+            proj_attr_type__name=GROUP_ATTRIBUTE_NAME
+        ).first()
+        group = project_attribute.value if project_attribute else None
+    return group.strip() if group and group.strip() else None
 
 
 def _previous_value(attribute, new_value):
@@ -300,20 +345,24 @@ def _storage(change, resource) -> AllocationUpdate:
     new_quota = f"{quota_change.new_value} {QUOTA_UNITS}"
     old_value = _previous_value(quota_change.allocation_attribute, quota_change.new_value)
     old_quota = f"{old_value} {QUOTA_UNITS}" if old_value is not None else None
-    path = change.allocation.get_attribute(PATH_ATTRIBUTE_NAME) or ""
+    allocation = change.allocation
+    path = allocation.get_attribute(PATH_ATTRIBUTE_NAME) or ""
+    windows_path = allocation.get_attribute(WINDOWS_PATH_ATTRIBUTE_NAME) or ""
 
     context = {
-        "allocation": change.allocation,
+        "allocation": allocation,
+        "allocation_url": build_link(allocation.get_absolute_url()),
+        "project": allocation.project,
         "change": change,
         "resource": resource,
         "old_quota": old_quota,
         "new_quota": new_quota,
         "path": path,
-        # The RStore wording (rstore_storage_update.txt) calls the path a share name.
-        "share_name": path,
+        "windows_path": windows_path,
     }
+    parts = [f"{resource.name}: Quota Change", new_quota, path or allocation.project.title]
     return AllocationUpdate(
-        short_description=f"{resource.name}: Quota Change | {new_quota} | {path}",
+        short_description=clean_short_description(" | ".join(p for p in parts if p)),
         comments=_render("allocation_update", resource, context),
         close_notes="Quota updated.",
         business_service=_business_service(resource),
@@ -325,13 +374,19 @@ def _storage_activation(allocation, resource) -> AllocationUpdate:
     quota = allocation.get_attribute(QUOTA_ATTRIBUTE_NAME)
     quota = f"{quota} {QUOTA_UNITS}" if quota is not None else None
     path = allocation.get_attribute(PATH_ATTRIBUTE_NAME) or ""
+    windows_path = allocation.get_attribute(WINDOWS_PATH_ATTRIBUTE_NAME) or ""
+    group = allocation_group(allocation)
     context = {
         "allocation": allocation,
+        "allocation_url": build_link(allocation.get_absolute_url()),
         "project": allocation.project,
         "resource": resource,
         "quota": quota,
         "path": path,
-        "share_name": path,
+        "windows_path": windows_path,
+        # for a course (course-tier-1-hpc.txt): everyone in the class, and its instructors and TAs
+        "group": group,
+        "admin_group": f"{group}{ADMIN_GROUP_SUFFIX}" if group else None,
     }
     parts = [f"{resource.name}: New Allocation", quota, path or allocation.project.title]
     return AllocationUpdate(
@@ -346,6 +401,7 @@ def _storage_activation(allocation, resource) -> AllocationUpdate:
 def _generic_activation(allocation, resource) -> AllocationUpdate:
     context = {
         "allocation": allocation,
+        "allocation_url": build_link(allocation.get_absolute_url()),
         "project": allocation.project,
         "resource": resource,
         "attributes": _public_attributes(allocation),
@@ -371,6 +427,7 @@ def _generic_change(change, resource) -> AllocationUpdate:
     ]
     context = {
         "allocation": allocation,
+        "allocation_url": build_link(allocation.get_absolute_url()),
         "project": allocation.project,
         "change": change,
         "resource": resource,

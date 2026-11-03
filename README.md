@@ -63,7 +63,8 @@ resolve is skipped. See "Triggers" in `docs/design.md`.
 **Everything else resolves on approval:** allocations on non-Storage resources, and Storage change
 requests with no quota change (an end-date extension, say). The storage plugin does nothing for
 them, so there's no outcome to wait for. They get a generic message: `allocation_new/generic.txt`
-or `allocation_change/generic.txt`, unless a template named after the resource or its type exists.
+or `allocation_change/generic.txt`, unless a template named after the resource, the resource it's an
+alias of (`TICKETING_RESOURCE_TEMPLATE_ALIASES`), or its type exists.
 Which way a request goes copies the storage plugin's own rule (`storage_will_provision`); see
 "What the storage plugin doesn't provision" in `docs/design.md`.
 
@@ -112,6 +113,9 @@ TICKETING_ASSIGNED_TO = "<service-account-utln>"  # assignee of resolved tickets
 # known terms their own way ("GPU", "FreeIPA"; see KNOWN_TERMS in ticketing/allocation_updates.py).
 # Add terms, or respell a default:
 # TICKETING_KNOWN_TERMS = ["NetApp", "SLURM"]
+# Customer messages are chosen by resource name, then resource type (see "What tickets say" in
+# docs/design.md). Let variants of a resource share its messages instead of copying them:
+# TICKETING_RESOURCE_TEMPLATE_ALIASES = {"Staff - Tier 1 HPC": "Tier 1 HPC"}
 
 # ServiceNow connection. Read credentials from the environment rather than committing them.
 SERVICENOW_URL = os.environ["SERVICENOW_URL"]

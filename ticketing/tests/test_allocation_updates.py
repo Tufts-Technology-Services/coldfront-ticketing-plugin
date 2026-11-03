@@ -22,9 +22,14 @@ from ticketing.tasks import people
 pytestmark = pytest.mark.django_db
 
 
-def make_storage_allocation(pi, *, resource_name="Research Storage", quota="10", path="/cluster/tufts/lab"):
-    """A Storage allocation with a quota (a Storage Quota (TB) attribute) and a path; returns (allocation, quota)."""
-    resource = f.ResourceFactory(name=resource_name, resource_type=f.ResourceTypeFactory(name="Storage"))
+def make_storage_allocation(
+    pi, *, resource_name="Research Storage", quota="10", path="/cluster/tufts/lab", requires_payment=True
+):
+    """A Storage allocation with a quota (a Storage Quota (TB) attribute) and a path; returns (allocation, quota).
+    Its resource is paid for, as the storage tiers are, unless `requires_payment` is False."""
+    resource = f.ResourceFactory(
+        name=resource_name, resource_type=f.ResourceTypeFactory(name="Storage"), requires_payment=requires_payment
+    )
     allocation = f.AllocationFactory(project=f.ProjectFactory(pi=pi))
     allocation.resources.add(resource)
     quota_attr = f.AllocationAttributeFactory(
@@ -44,9 +49,13 @@ def make_storage_allocation(pi, *, resource_name="Research Storage", quota="10",
     return allocation, quota_attr
 
 
-def make_storage_change(pi, *, resource_name="Research Storage", old="10", new="20", path="/cluster/tufts/lab"):
+def make_storage_change(
+    pi, *, resource_name="Research Storage", old="10", new="20", path="/cluster/tufts/lab", requires_payment=True
+):
     """An approved Storage Quota (TB) change: the attribute already holds the new value."""
-    allocation, quota = make_storage_allocation(pi, resource_name=resource_name, quota=old, path=path)
+    allocation, quota = make_storage_allocation(
+        pi, resource_name=resource_name, quota=old, path=path, requires_payment=requires_payment
+    )
     change = f.AllocationChangeRequestFactory(allocation=allocation)
     f.AllocationAttributeChangeRequestFactory(
         allocation_change_request=change, allocation_attribute=quota, new_value=new
@@ -95,23 +104,62 @@ def use_client(monkeypatch):
 
 
 def test_storage_quota_change_message(pi):
-    update = describe_change(make_storage_change(pi))
+    change = make_storage_change(pi)
+    update = describe_change(change)
 
     assert update.short_description == "Research Storage: Quota Change | 20 TB | /cluster/tufts/lab"
-    assert "from 10 TB to 20 TB has been applied to Research Storage (/cluster/tufts/lab)" in update.comments
+    title = change.allocation.project.title
+    assert (
+        f'The Research Storage storage allocation for project "{title}" (/cluster/tufts/lab) has been adjusted '
+        "from 10 TB to 20 TB."
+    ) in update.comments
+    assert "https://rcrm.it.tufts.edu/" in update.comments  # partials/rcrm.txt
+    assert "research-data-storage-faq" in update.comments  # partials/charge_back.txt
+    assert "Please email TTS-Research@tufts.edu for additional support." in update.comments
+    assert "July 1, 2026" not in update.comments  # the old dated reminder is gone
     assert "Research Technology (RT)" in update.comments  # footer included
     assert update.business_service == "Research Data Storage"
+
+
+def test_an_rstore_quota_change_names_its_smb_path(pi):
+    change = make_storage_change(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
+    add_windows_path(change.allocation, RSTORE_WINDOWS_PATH)
+    update = describe_change(change)
+
+    assert update.short_description == f"Tier 1 RStore: Quota Change | 20 TB | {RSTORE_SMB_PATH}"
+    assert f'" ({RSTORE_SMB_PATH}) has been adjusted from 10 TB to 20 TB.' in update.comments
+    assert RSTORE_WINDOWS_PATH not in update.comments
+
+
+def test_a_quota_change_with_neither_path_ends_with_the_project(pi):
+    change = make_storage_change(pi, path=None)
+
+    update = describe_change(change)
+
+    assert update.short_description == f"Research Storage: Quota Change | 20 TB | {change.allocation.project.title}"
 
 
 def test_resource_specific_template_wins_over_the_type_template(pi, settings, tmp_path):
     override = tmp_path / "ticketing" / "allocation_update" / "tier-1-rstore.txt"
     override.parent.mkdir(parents=True)
-    override.write_text("RStore says {{ old_quota }} -> {{ new_quota }} on {{ share_name }}")
+    override.write_text("RStore says {{ old_quota }} -> {{ new_quota }} on {{ path }}")
     settings.TEMPLATES = [{**settings.TEMPLATES[0], "DIRS": [tmp_path, *settings.TEMPLATES[0].get("DIRS", [])]}]
 
     update = describe_change(make_storage_change(pi, resource_name="Tier 1 RStore", path="rt-lab-share"))
 
     assert update.comments == "RStore says 10 TB -> 20 TB on rt-lab-share"
+
+
+def test_an_aliased_resource_uses_the_template_of_the_resource_its_an_alias_of(pi, settings, tmp_path):
+    override = tmp_path / "ticketing" / "allocation_update" / "tier-1-rstore.txt"
+    override.parent.mkdir(parents=True)
+    override.write_text("RStore says {{ new_quota }}")
+    settings.TEMPLATES = [{**settings.TEMPLATES[0], "DIRS": [tmp_path, *settings.TEMPLATES[0].get("DIRS", [])]}]
+    settings.TICKETING_RESOURCE_TEMPLATE_ALIASES = {"TTS Staff - Tier 1 RStore": "Tier 1 RStore"}
+
+    update = describe_change(make_storage_change(pi, resource_name="TTS Staff - Tier 1 RStore"))
+
+    assert update.comments == "RStore says 20 TB"
 
 
 def test_a_storage_change_without_a_quota_change_gets_the_generic_message(pi):
@@ -562,7 +610,7 @@ def test_request_then_approval_resolves_the_same_incident(pi, requestor, use_cli
     [(incident, fields)] = snow.incidents.values()
     assert incident.state == "6"
     assert fields["close_code"] == "Solved Remotely (Permanently)"
-    assert "to 20 TB has been applied" in fields["comments"]
+    assert "has been adjusted from 10 TB to 20 TB." in fields["comments"]
     assert "Quota Change Request" in fields["short_description"]  # the request's, not overwritten
 
 
@@ -586,8 +634,16 @@ def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requesto
     assert ticket["u_action"] == "Activate/Setup/Install"
     assert ticket["u_business_service"] == "Research Data Storage"
     description = ticket["description"]
-    assert "- Storage Quota (TB): 10" in description
-    assert "- Storage Path: /cluster/tufts/lab" in description
+    assert (
+        f"Project:            {allocation.project.title}\n"
+        "PI:                 asmith02 (asmith02)\n"
+        "Requested by:       jdoe01 (jdoe01)\n"
+        "Resource:           Research Storage\n"
+        "Storage Path:       /cluster/tufts/lab\n"
+        "Storage Quota (TB): 10\n"
+        "\nReason for request:\n"
+    ) in description
+    assert "Quantity" not in description
     assert allocation.justification in description
     assert f"Review in ColdFront: {reverse('allocation-detail', kwargs={'pk': allocation.pk})}" in description
 
@@ -614,7 +670,7 @@ def test_the_new_allocation_request_description_leaves_out_private_attributes(pi
 
     description = describe_new_allocation(allocation, requestor).description
 
-    assert "- Slurm account name: smith_lab" in description
+    assert "\nSlurm account name: smith_lab\n" in description
     assert "internal_note" not in description and "hidden" not in description
 
 
@@ -671,9 +727,12 @@ def test_request_then_activation_resolves_the_same_incident(pi, requestor, use_c
     assert fields["close_code"] == "Solved Remotely (Permanently)"
     assert fields["close_notes"] == "Allocation activated."
     comments = fields["comments"]
-    assert f"Your new allocation on Research Storage for project {allocation.project.title} is now active." in comments
+    assert (
+        f'The Research Storage storage allocation for project "{allocation.project.title}" has been created.'
+        in comments
+    )
     assert "Quota: 10 TB" in comments and "Path:  /cluster/tufts/lab" in comments
-    assert fields["caller_id"] == "jdoe01"  # the request's people fields are kept
+    assert fields["u_contact_person"] == "jdoe01"  # the request's people fields are kept
 
 
 def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
@@ -688,6 +747,147 @@ def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
     assert ticket["caller_id"] == "asmith02"  # no requestor: the PI
     assert ticket["u_action"] == "Activate/Setup/Install"
     assert "Path:" not in ticket["comments"]
+
+
+RSTORE_SMB_PATH = "smb://rstore.it.tufts.edu/smith_lab$"
+RSTORE_WINDOWS_PATH = "\\\\rstore.it.tufts.edu\\smith_lab$"
+
+
+def add_windows_path(allocation, value):
+    f.AllocationAttributeFactory(
+        allocation=allocation,
+        allocation_attribute_type=f.AllocationAttributeTypeFactory(
+            name="Storage Path (Windows)", attribute_type=f.AAttributeTypeFactory(name="Text"), is_private=False
+        ),
+        value=value,
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_name, tier, guide",
+    [
+        ("Tier 1 HPC", "Tier 1 HPC", "10-tier1-hpc.html#access-methods"),
+        ("Tier 1 RStore", "Tier 1 RStore", "20-tier1-rstore.html#access-methods"),
+        ("Tier 2 Research", "Tier 2 Research", "30-tier2.html#access-method-globus"),
+    ],
+)
+def test_each_storage_tier_has_its_own_new_allocation_message(pi, resource_name, tier, guide):
+    allocation, _ = make_storage_allocation(pi, resource_name=resource_name)
+
+    comments = describe_activation(allocation).comments
+
+    title = allocation.project.title
+    assert f'The {tier} storage allocation for project "{title}" has been created.' in comments
+    assert "It may take 24 hrs for your Tufts credentials to propagate" in comments
+    assert "/cluster/tufts/lab" in comments and "Quota: 10 TB" in comments
+    assert f"https://rtguides.it.tufts.edu/storage/systems/{guide}" in comments
+    assert "https://rcrm.it.tufts.edu/" in comments and "research-data-storage-faq" in comments
+    assert "July 1, 2026" not in comments
+    assert "&amp;" not in comments and "{%" not in comments
+
+
+def test_a_staff_copy_of_a_tier_gets_the_tiers_message_through_an_alias(pi, settings):
+    settings.TICKETING_RESOURCE_TEMPLATE_ALIASES = {"TTS Staff - Tier 1 HPC": "Tier 1 HPC"}
+    allocation, _ = make_storage_allocation(pi, resource_name="TTS Staff - Tier 1 HPC")
+
+    assert "The Tier 1 HPC storage allocation for project" in describe_activation(allocation).comments
+
+
+def test_a_storage_resource_without_its_own_message_gets_the_storage_one(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 3 Research", path=None)
+
+    comments = describe_activation(allocation).comments
+
+    assert (
+        f'The Tier 3 Research storage allocation for project "{allocation.project.title}" has been created.' in comments
+    )
+    assert "Quota: 10 TB" in comments and "Path:" not in comments
+    assert "rtguides.it.tufts.edu/storage/systems" not in comments  # no tier's guide
+
+
+def test_a_new_rstore_allocation_lists_its_smb_paths_for_mac_and_windows(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
+    add_windows_path(allocation, RSTORE_WINDOWS_PATH)
+
+    update = describe_activation(allocation)
+
+    assert f"Mac OS: {RSTORE_SMB_PATH}\nWindows OS: {RSTORE_WINDOWS_PATH}\n" in update.comments
+    assert "Path:" not in update.comments  # the SMB path is listed once, as the Mac one
+    assert "Quota: 10 TB" in update.comments
+    assert update.short_description == f"Tier 1 RStore: New Allocation | 10 TB | {RSTORE_SMB_PATH}"
+
+
+def test_a_new_rstore_allocation_without_a_windows_path_lists_only_the_mac_one(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
+
+    comments = describe_activation(allocation).comments
+
+    assert f"Mac OS: {RSTORE_SMB_PATH}\n" in comments and "Windows OS:" not in comments
+
+
+def add_group(allocation, value):
+    f.AllocationAttributeFactory(
+        allocation=allocation,
+        allocation_attribute_type=f.AllocationAttributeTypeFactory(
+            name="Group", attribute_type=f.AAttributeTypeFactory(name="Text")
+        ),
+        value=value,
+    )
+
+
+def test_course_storage_explains_the_class_folders_and_names_its_groups(pi):
+    allocation, _ = make_storage_allocation(
+        pi, resource_name="Course - Tier 1 HPC", path="/cluster/tufts/bio101", requires_payment=False
+    )
+    add_group(allocation, "bio101")
+
+    comments = describe_activation(allocation).comments
+
+    assert f'The Tier 1 HPC class storage for "{allocation.project.title}" has been created.' in comments
+    assert "Path:  /cluster/tufts/bio101" in comments and "Quota: 10 TB" in comments
+    assert "an admin group (bio101admin), which only includes instructors and TAs" in comments
+    assert "a general class group (bio101), which includes everyone in the class" in comments
+    assert "their own folder and the shared folder (/cluster/tufts/bio101/shared)." in comments
+    assert "10-tier1-hpc.html#access-methods" in comments
+    assert "Charge-Back" not in comments  # course storage isn't paid for
+    assert "&amp;" not in comments and "&#x27;" not in comments and "{%" not in comments
+
+
+def test_course_storage_takes_its_group_from_the_project_without_one_of_its_own(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Course - Tier 1 HPC")
+    group_type = f.ProjectAttributeTypeFactory(name="Group")
+    f.ProjectAttributeFactory(project=allocation.project, proj_attr_type=group_type, value="chem202")
+
+    comments = describe_activation(allocation).comments
+
+    assert "(chem202admin)" in comments and "(chem202)" in comments
+
+
+def test_course_storage_without_a_group_or_path_still_explains_the_folders(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Course - Tier 1 HPC", path=None)
+
+    comments = describe_activation(allocation).comments
+
+    assert "There are two groups for the class: an admin group, which only includes" in comments
+    assert "their own folder and the shared folder." in comments
+
+
+def test_storage_nobody_pays_for_leaves_out_the_charge_back(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 HPC", requires_payment=False)
+    change = make_storage_change(pi, requires_payment=False)
+
+    assert "Charge-Back" not in describe_activation(allocation).comments
+    assert "Charge-Back" not in describe_change(change).comments
+    assert "https://rcrm.it.tufts.edu/" in describe_activation(allocation).comments
+
+
+def test_a_new_rstore_allocation_without_paths_leaves_them_out(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=None)
+
+    comments = describe_activation(allocation).comments
+
+    assert "Mac OS:" not in comments and "Windows OS:" not in comments
+    assert "access-methods)\n\nResearch Computing Resource Manager" in comments  # no stray blank lines
 
 
 # -- Staff requests are assigned to the admin who approved them --------------------------------
@@ -843,3 +1043,45 @@ def test_the_generic_activation_message_without_attributes_has_no_details_sectio
 
     assert "Allocation details" not in comments
     assert "is now active.\n" in comments
+
+
+# -- Customer messages link the allocation's page ------------------------------------------------
+
+
+def rcrm_link_line(allocation):
+    return f"View this allocation in RCRM: {reverse('allocation-detail', kwargs={'pk': allocation.pk})}"
+
+
+@pytest.mark.parametrize(
+    "resource_name", ["Tier 1 HPC", "Course - Tier 1 HPC", "Tier 1 RStore", "Tier 2 Research", "Tier 3 Research"]
+)
+def test_a_new_storage_allocation_message_links_its_page_after_the_details(pi, resource_name):
+    allocation, _ = make_storage_allocation(pi, resource_name=resource_name)
+
+    comments = describe_activation(allocation).comments
+
+    assert f"Quota: 10 TB\n\n{rcrm_link_line(allocation)}\n\n" in comments
+
+
+def test_a_quota_change_message_links_the_allocations_page(pi):
+    change = make_storage_change(pi)
+
+    comments = describe_change(change).comments
+
+    assert f"from 10 TB to 20 TB.\n\n{rcrm_link_line(change.allocation)}\n\n" in comments
+
+
+def test_the_generic_new_allocation_message_links_its_page(pi):
+    allocation = make_cluster_allocation(pi)
+
+    comments = describe_activation(allocation).comments
+
+    assert f"\n{rcrm_link_line(allocation)}\n\nThank you," in comments
+
+
+def test_the_generic_change_message_links_the_allocations_page(pi):
+    change = cluster_change(pi)
+
+    comments = describe_change(change).comments
+
+    assert f"\n{rcrm_link_line(change.allocation)}\n\nThank you," in comments

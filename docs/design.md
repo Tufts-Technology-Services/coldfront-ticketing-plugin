@@ -230,9 +230,26 @@ the link form), whose requests open no ticket, and who is left out of project no
   summarise the request: project, PI, requester, resource, attributes and the justification, with a
   link back to ColdFront.
 - **Customer messages** are chosen by resource: the first of `<folder>/<resource name>.txt`,
-  `<folder>/<resource type>.txt` and `<folder>/generic.txt` that exists. Storage has its own
-  messages (a new share, a quota change). Everything else gets the generic ones, so a resource that
-  needs its own wording only needs a template named after it or its type.
+  `<folder>/<alias>.txt`, `<folder>/<resource type>.txt` and `<folder>/generic.txt` that exists
+  (names slugified). The alias is another resource's name, from `TICKETING_RESOURCE_TEMPLATE_ALIASES`,
+  so variants of a resource (a staff or course copy of a storage tier) share its messages rather
+  than each needing a copy. Everything else gets the generic ones, so a resource that needs its own
+  wording only needs a template named after it or its type.
+- **Storage messages:** a new allocation on each storage tier has its own message
+  (`allocation_new/tier-1-hpc.txt`, `tier-1-rstore.txt`, `tier-2-research.txt`), with the tier's
+  access guide, and HPC course storage has `allocation_new/course-tier-1-hpc.txt`, which explains
+  the class folders and names the class and admin groups (the allocation's or else the project's
+  `Group`, and that plus `admin`, as the storage plugin creates them). Other storage resources get
+  `allocation_new/storage.txt`. Every quota change gets
+  `allocation_update/storage.txt`, naming the resource and the old and new quota. They share the
+  RCRM and charge-back paragraphs (`partials/rcrm.txt`, `partials/charge_back.txt`; the charge-back
+  only for a resource that `requires_payment`) and list the
+  allocation's path (`Storage Path`) and quota where it has them. On RStore, `Storage Path` holds
+  the SMB URL (`smb://...`) and `Storage Path (Windows)` the Windows form; the RStore message lists
+  them as the Mac OS and Windows OS paths, leaving out whichever the allocation doesn't have.
+- **Customer messages link the allocation's page** ("View this allocation in RCRM: ..."), new
+  allocations and completed changes alike, generic messages included (`partials/allocation_link.txt`).
+  Links are built from ColdFront's `CENTER_BASE_URL`, so it has to be ColdFront's own address.
 - **Only attributes the customer can see** (whose type isn't marked private) are listed, in
   customer messages and request descriptions alike: the PI and Managers are on those tickets.
 - **Attribute names are made readable:** `slurm_account_name` becomes "Slurm account name". Known

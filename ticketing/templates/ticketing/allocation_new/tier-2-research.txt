@@ -1,0 +1,18 @@
+{% autoescape off %}Hello,
+
+The Tier 2 Research storage allocation for project "{{ project.title }}" has been created. Please reference the self-service guidance below for storage access. NOTE: It may take 24 hrs for your Tufts credentials to propagate, before you can access the new storage.{% include "ticketing/partials/storage_details.txt" %}
+
+{% include "ticketing/partials/allocation_link.txt" %}
+
+Tiered Storage Allocation Self-Service Access Guides
+Tier 2 Research (https://rtguides.it.tufts.edu/storage/systems/30-tier2.html#access-method-globus)
+
+{% include "ticketing/partials/rcrm.txt" %}
+
+{% if resource.requires_payment %}{% include "ticketing/partials/charge_back.txt" %}
+
+{% endif %}Please visit the TTS Research Technology Guides (https://rtguides.it.tufts.edu/) or email TTS-Research@tufts.edu for additional support.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

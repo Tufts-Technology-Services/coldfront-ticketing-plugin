@@ -1,0 +1,4 @@
+{% autoescape off %}Tiered Research Storage Charge-Back: Storage owners and approvers should manage research storage resources, plan and budget accordingly for any potential storage charges. For complete details about the charge-back model, including frequently asked questions, please visit the resources below:
+
+https://it.tufts.edu/research-data-storage#changes
+https://it.tufts.edu/research-data-storage-faq{% endautoescape %}

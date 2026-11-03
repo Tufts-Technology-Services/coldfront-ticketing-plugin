@@ -7,6 +7,8 @@ Allocation details:
 {% for a in attributes %}- {{ a.name }}: {{ a.value }}
 {% endfor %}{% else %}
 {% endif %}
+{% include "ticketing/partials/allocation_link.txt" %}
+
 Thank you,
 
 {% include "ticketing/partials/footer.txt" %}{% endautoescape %}
