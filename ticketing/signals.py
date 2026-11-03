@@ -12,6 +12,7 @@ Imported by TicketingConfig.ready() when TICKETING_ENABLE_SIGNALS is set.
     share_creation_failed, quota_update_failed             file_storage_failure_ticket
     either success, after a failure                        resolve_storage_failure_ticket
     project_activate_user, project_remove_user (any sender)  create_project_users_ticket
+    project_activate_user (any sender)                     create_project_user_added_ticket
     hpc_account_requested (account signup, no UID yet)     create_hpc_account_ticket
     hpc_account_provisioned (account signup)               resolve_hpc_account_ticket
     hpc_account_provisioning_failed (account signup)       file_hpc_account_failure_ticket
@@ -346,7 +347,7 @@ def hpc_account_setup_failed(sender, username, message="", **kwargs):
     enqueue_ticket("ticketing.tasks.file_hpc_account_failure_ticket", username, message)
 
 
-# -- Project users: one notice per project, per day ---------------------------------------------
+# -- Project users: one notice per project, per day, and one to each user added -----------------
 
 
 @receiver(project_activate_user, dispatch_uid="ticketing-project-user-added")
@@ -357,19 +358,45 @@ def project_users_changed(sender, project_user_pk, **kwargs):
     ColdFront sends one signal per user added or removed, so changing five users in one form sends
     five. The task's per-day correlation_id stops a second ticket only once the first is filed, and
     five tasks queued together could each look before any had filed; so within a request only the
-    first is queued. Ticketing admins (ticketing.permissions) being added or removed aren't members to
-    notify, and queue nothing. Neither does the PI: Tufts' project-create view sends project_activate_user
-    for the new project's PI, and a PI is never otherwise added or removed, so it would only ever
-    tell a new project's PI that its users had changed.
+    first is queued. Changes to ticketing admins and the PI queue nothing (notifiable_project_user).
     """
-    project_user = ProjectUser.objects.select_related("user", "project").get(pk=project_user_pk)
-    if is_ticketing_admin(project_user.user) or project_user.user_id == project_user.project.pi_id:
+    project_user = notifiable_project_user(project_user_pk)
+    if project_user is None:
         return
     if not first_in_request(("project-users", project_user.project_id)):
         return
     enqueue_ticket(
         "ticketing.tasks.create_project_users_ticket", project_user.project_id, requestor_pk=requestor_pk(kwargs)
     )
+
+
+@receiver(project_activate_user, dispatch_uid="ticketing-project-user-welcomed")
+def project_user_added(sender, project_user_pk, **kwargs):
+    """Queue the added user's own notice, one per user: each is a different ticket, so tasks queued
+    together don't race. Not for ticketing admins or the PI (notifiable_project_user)."""
+    project_user = notifiable_project_user(project_user_pk)
+    if project_user is None:
+        return
+    enqueue_ticket(
+        "ticketing.tasks.create_project_user_added_ticket",
+        project_user.project_id,
+        project_user.user_id,
+        requestor_pk=requestor_pk(kwargs),
+    )
+
+
+def notifiable_project_user(project_user_pk):
+    """The ProjectUser a project user signal is about, or None if the change should file nothing.
+
+    Ticketing admins (ticketing.permissions) being added or removed aren't members to notify. Nor is
+    the PI: Tufts' project-create view sends project_activate_user for the new project's PI, and a PI
+    is never otherwise added or removed, so it would only ever tell a new project's PI that its users
+    had changed, or that they'd been added to their own project.
+    """
+    project_user = ProjectUser.objects.select_related("user", "project").get(pk=project_user_pk)
+    if is_ticketing_admin(project_user.user) or project_user.user_id == project_user.project.pi_id:
+        return None
+    return project_user
 
 
 def first_in_request(key) -> bool:

@@ -21,6 +21,7 @@ from coldfront_utils.signals import (
     share_creation_failed,
     share_creation_successful,
 )
+from django.contrib.auth import get_user_model
 from simple_history.models import HistoricalRecords
 
 from ticketing.models import FiledTicket
@@ -438,7 +439,7 @@ def test_a_marker_that_cant_be_saved_is_logged_and_the_resolve_goes_ahead(pi, ad
     assert "Could not record that ticketing is off" in caplog.text
 
 
-# -- Project users: one notice per project, per day -------------------------------
+# -- Project users: one notice per project, per day, and one to each user added ---
 
 
 @pytest.fixture
@@ -454,6 +455,24 @@ def add(project, *usernames):
         project.add_user(f.UserFactory(username=username), role, signal_sender=object)
 
 
+def project_notices(queued):
+    """The daily project notices among the queued tasks."""
+    return [task for task in queued if task[0] == "ticketing.tasks.create_project_users_ticket"]
+
+
+def added_user_notices(queued):
+    """The added users' own notices among the queued tasks, as (project pk, user pk, requestor pk)."""
+    return [
+        (*args, kwargs["requestor_pk"])
+        for name, args, kwargs in queued
+        if name == "ticketing.tasks.create_project_user_added_ticket"
+    ]
+
+
+def user_pk(username):
+    return get_user_model().objects.get(username=username).pk
+
+
 def remove(project, *usernames):
     f.ProjectUserStatusChoiceFactory(name="Removed")
     for username in usernames:
@@ -466,7 +485,9 @@ def test_adding_several_users_in_one_request_queues_one_notice(lab, requestor, i
     with committed():
         add(lab, "u1", "u2", "u3")
 
-    assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]
+    assert project_notices(queued) == [
+        ("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})
+    ]
 
 
 def test_adds_and_removes_in_one_request_queue_one_notice(lab, requestor, in_request, queued, committed):
@@ -477,7 +498,9 @@ def test_adds_and_removes_in_one_request_queue_one_notice(lab, requestor, in_req
         add(lab, "u3")
         remove(lab, "u1", "u2")
 
-    assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]
+    assert project_notices(queued) == [
+        ("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})
+    ]
 
 
 def test_removing_users_queues_the_same_notice(lab, requestor, in_request, queued, committed):
@@ -487,7 +510,9 @@ def test_removing_users_queues_the_same_notice(lab, requestor, in_request, queue
     with committed():
         remove(lab, "u1")
 
-    assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]
+    assert project_notices(queued) == [
+        ("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})
+    ]
 
 
 def test_each_project_gets_its_own_notice(lab, pi, requestor, in_request, queued, committed):
@@ -498,15 +523,16 @@ def test_each_project_gets_its_own_notice(lab, pi, requestor, in_request, queued
         add(lab, "u1")
         add(other, "u2")
 
-    assert [args for _, args, _ in queued] == [(lab.pk,), (other.pk,)]
+    assert [args for _, args, _ in project_notices(queued)] == [(lab.pk,), (other.pk,)]
 
 
 def test_outside_a_request_each_add_queues_and_the_task_dedupes(lab, queued, committed):
     with committed():
         add(lab, "u1", "u2")
 
-    assert [args for _, args, _ in queued] == [(lab.pk,), (lab.pk,)]
-    assert queued[0][2] == {"requestor_pk": None}
+    notices = project_notices(queued)
+    assert [args for _, args, _ in notices] == [(lab.pk,), (lab.pk,)]
+    assert notices[0][2] == {"requestor_pk": None}
 
 
 def test_creating_a_project_queues_no_notice_for_its_pi(lab, pi, in_request, queued, committed):
@@ -530,7 +556,9 @@ def test_the_pis_add_doesnt_use_up_the_request(lab, pi, in_request, queued, comm
         lab.add_user(pi, role, signal_sender=object)
         add(lab, "u1")
 
-    assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": pi.pk})]
+    assert project_notices(queued) == [
+        ("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": pi.pk})
+    ]
 
 
 @pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
@@ -546,7 +574,9 @@ def test_ticketing_admins_added_queue_nothing_and_dont_use_up_the_request(
         lab.add_user(added, role, signal_sender=object)
         add(lab, "u1")
 
-    assert queued == [("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})]
+    assert project_notices(queued) == [
+        ("ticketing.tasks.create_project_users_ticket", (lab.pk,), {"requestor_pk": requestor.pk})
+    ]
 
 
 def test_admin_with_ticketing_off_queues_no_project_notice(lab, admin, in_request, queued, committed):
@@ -556,6 +586,61 @@ def test_admin_with_ticketing_off_queues_no_project_notice(lab, admin, in_reques
         add(lab, "u1")
 
     assert queued == []
+
+
+def test_each_user_added_gets_their_own_notice(lab, requestor, in_request, queued, committed):
+    in_request(requestor)
+
+    with committed():
+        add(lab, "u1", "u2")
+
+    assert added_user_notices(queued) == [
+        (lab.pk, user_pk("u1"), requestor.pk),
+        (lab.pk, user_pk("u2"), requestor.pk),
+    ]
+
+
+def test_removing_users_sends_them_no_notice_of_their_own(lab, requestor, in_request, queued, committed):
+    add(lab, "u1")
+    queued.clear()
+    in_request(requestor)
+
+    with committed():
+        remove(lab, "u1")
+
+    assert added_user_notices(queued) == []
+    assert len(project_notices(queued)) == 1
+
+
+def test_outside_a_request_the_added_user_is_still_told(lab, queued, committed):
+    with committed():
+        add(lab, "u1")
+
+    assert added_user_notices(queued) == [(lab.pk, user_pk("u1"), None)]
+
+
+def test_the_pi_added_to_their_own_project_gets_no_notice(lab, pi, in_request, queued, committed):
+    in_request(pi)
+    role = f.ProjectUserRoleChoiceFactory(name="Manager")
+    f.ProjectUserStatusChoiceFactory(name="Active")
+
+    with committed():
+        lab.add_user(pi, role, signal_sender=object)
+
+    assert added_user_notices(queued) == []
+
+
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+def test_ticketing_admins_added_get_no_notice(lab, requestor, in_request, queued, committed, request, who):
+    added = request.getfixturevalue(who)
+    in_request(requestor)
+    role = f.ProjectUserRoleChoiceFactory(name="User")
+    f.ProjectUserStatusChoiceFactory(name="Active")
+
+    with committed():
+        lab.add_user(added, role, signal_sender=object)
+
+    assert added_user_notices(queued) == []
 
 
 # -- HPC accounts ---------------------------------------------------------------------------------

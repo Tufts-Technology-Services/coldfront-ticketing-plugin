@@ -141,6 +141,20 @@ def project_users_slot(project) -> TicketSlot:
     )
 
 
+def project_user_added_correlation_id(project_pk, username) -> str:
+    return f"coldfront:project-user-added:{project_pk}:{username}:{timezone.localdate().isoformat()}"
+
+
+def project_user_added_slot(project, user) -> TicketSlot:
+    """The ticket telling `user` they were added to `project` today."""
+    return TicketSlot(
+        correlation_id=project_user_added_correlation_id(project.pk, user.username),
+        what=f"adding {user.username} to project {project.pk}",
+        kind=FiledTicket.Kind.PROJECT_USER_ADDED,
+        subjects={"project": project, "user": user},
+    )
+
+
 def hpc_account_correlation_id(username) -> str:
     return f"coldfront:hpc-account:{username}"
 

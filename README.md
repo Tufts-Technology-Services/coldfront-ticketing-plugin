@@ -41,7 +41,8 @@ settings).
 | Quota changed | `quota_update_successful` | the storage task | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
 | Storage job failed | `share_creation_failed`, `quota_update_failed` | the storage task | File an admin-only child of the request's incident; a later success resolves it |
 | Allocation activated, or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | If storage won't provision it (non-Storage resources; Storage changes with no quota change), resolve the request's incident with a generic message. Otherwise nothing, unless the approving admin's switch is off (see below) |
-| Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice, once per project per day |
+| Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice for the PI and Approvers, once per project per day |
+| A user added to a project | `project_activate_user` | any | File a resolved notice to that user, with how to reach the project's storage, once per user, project and day |
 | HPC account requested and not ready yet (today: the user had no UID) | `hpc_account_requested` | the account signup plugin's `create_home` | Open an incident telling the user their request was received and they'll hear when it's ready |
 | HPC account provisioned | `hpc_account_provisioned` | the account signup plugin's `create_home` | Welcome the user and resolve the request's incident, or file one already resolved |
 | HPC account setup failed | `hpc_account_provisioning_failed` | the account signup plugin's `create_home` | File an admin-only child of the account's incident; a later success resolves it |
@@ -76,6 +77,13 @@ add, so the PI and Approvers aren't told about it. The next day's first change f
 notice that its users had changed. A PI isn't otherwise added to or removed from a project.
 Ticketing admins (see "Ticketing admins" below) are skipped too: they aren't project members
 to notify. See "Project user notices" in `docs/design.md`.
+
+**Each user added also gets a notice of their own.** It's a separate already-resolved incident with
+the added user as caller, so ServiceNow emails them the message
+(`project_user_added_notification.txt`): they've been added to the project, where the storage access
+guides are, and that access can take an hour or two to appear. Nobody is watch-listed, since the PI
+and Approvers get the project notice instead. Adding five users files five of these. Removed users
+get nothing.
 
 Denials send no signal; their incidents stay open for admins to handle manually. Allocation renewals
 and account upgrade requests are unused at Tufts and out of scope. See "Out of scope" in
@@ -138,7 +146,7 @@ through a group, in Django admin. Django's `is_staff` alone doesn't count. Ticke
 - get the ticketing switch, the ticket card and its link form;
 - can view filed tickets in Django admin (which itself admits only `is_staff` users);
 - open no ticket when they submit an allocation or change request (see the link form, below);
-- file no project user notice when they're added to or removed from a project.
+- file no project user notices when they're added to or removed from a project.
 
 ### Admin ticketing switch
 
@@ -200,7 +208,7 @@ Deleting a record only forgets the link; the ticket stays in ServiceNow.
 ```
 ticketing/
   apps.py       AppConfig; ready() imports signals when TICKETING_ENABLE_SIGNALS
-  signals.py    requests, storage success, project user changes -> enqueue_ticket
+  signals.py    requests, storage success, project user changes, HPC accounts -> enqueue_ticket
   dispatch.py   enqueue_ticket: the one way tasks get queued; honours the admin switch
   toggle.py     the admin switch, kept in the session
   permissions.py   is_ticketing_admin: superusers and holders of ticketing.manage_ticketing

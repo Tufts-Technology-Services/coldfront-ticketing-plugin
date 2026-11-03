@@ -43,6 +43,7 @@ identified by a deterministic `correlation_id`:
 | An allocation change request | `coldfront:allocation-change:<pk>` |
 | A storage job failing for either | the request's, plus `:storage-failed` |
 | A day's changes to a project's users | `coldfront:project-users:<project pk>:<YYYY-MM-DD>` |
+| A user added to a project, that day | `coldfront:project-user-added:<project pk>:<username>:<YYYY-MM-DD>` |
 | An HPC account | `coldfront:hpc-account:<username>` |
 
 The plugin writes the `correlation_id` onto the incident it files, so every task can find "the
@@ -68,7 +69,8 @@ tasks and linking all use, so each kind of request is described in one place.
 | The storage plugin reports that it provisioned the request | The incident is resolved with a customer message. |
 | A request the storage plugin doesn't provision is approved | The incident is resolved with a generic customer message. |
 | The storage plugin reports a failure | An admin-only child ticket is filed. A later success resolves it too. |
-| A project's users change | One already-resolved notice per project per day. |
+| A project's users change | One already-resolved notice per project per day, for the PI and Approvers. |
+| A user is added to a project | An already-resolved notice to that user, telling them how to reach the project's storage. |
 | An HPC signup has to wait because the user had no UID | A ticket opens, telling the user their request was received. |
 | An HPC account is provisioned | The user is welcomed, and the request's ticket resolved (or one filed already resolved). |
 | Setting up an HPC account fails | An admin-only child ticket is filed. A later success resolves it too. |
@@ -131,6 +133,17 @@ project have changed") per project per day, adds and removes together. ColdFront
 nothing. Within one request only the first signal queues a task, since tasks queued together could
 each look for the day's ticket before any had filed it. Changes to ticketing admins, and to the
 project's PI, file nothing.
+
+Each user added also gets a notice of their own, from `create_project_user_added_ticket`, queued
+for every `project_activate_user` with the same skips. A comment emails everyone on the ticket alike
+(the caller and the watch list), so a message for the new member can't share a ticket with the PI
+and Approvers' notice. It's a separate incident, filed already resolved, with the added user as
+caller, whoever added them as contact person, and nobody watch-listed. Its message
+(`project_user_added_notification.txt`) says they've been added, points to the storage access guides
+and RCRM, and warns that access can take an hour or two to appear. One per user, project and day, so
+a re-run or a same-day re-add sends nothing more; each user's ticket is its own, so the tasks don't
+race as the project notice's would. It has no `parent`: it stands on its own, as the HPC account
+ticket does. Removed users get no notice of their own.
 
 ### HPC account tickets
 
