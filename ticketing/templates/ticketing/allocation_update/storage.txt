@@ -1,8 +1,14 @@
 {% autoescape off %}Hello,
 
-The requested quota change{% if old_quota %} from {{ old_quota }}{% endif %} to {{ new_quota }} has been applied to {{ resource.name }}{% if path %} ({{ path }}){% endif %}.
+The {{ resource.name }} storage allocation for project "{{ project.title }}"{% if path %} ({{ path }}){% endif %} has been adjusted{% if old_quota %} from {{ old_quota }}{% endif %} to {{ new_quota }}.
 
-{% include "ticketing/partials/notifications.txt" %}
+{% include "ticketing/partials/allocation_link.txt" %}
+
+{% include "ticketing/partials/rcrm.txt" %}
+
+{% if resource.requires_payment %}{% include "ticketing/partials/charge_back.txt" %}
+
+{% endif %}Please email TTS-Research@tufts.edu for additional support.
 
 Thank you,
 

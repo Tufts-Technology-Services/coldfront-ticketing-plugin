@@ -1,0 +1,4 @@
+{% autoescape off %}{% if path or quota %}
+{% if path %}
+Path:  {{ path }}{% endif %}{% if quota %}
+Quota: {{ quota }}{% endif %}{% endif %}{% endautoescape %}

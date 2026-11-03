@@ -49,7 +49,8 @@ def file_storage_failure_ticket(
     with share_creation_failed for an allocation, quota_update_failed for `allocation_change_pk`). The ticket is a child (parent) of the
     request's incident -- ColdFront's own, or the customer's if an admin linked it -- or has no
     parent when there is none, as for a ticketing admin's unlinked request. The approving admin is
-    caller and contact (TICKETING_ASSIGNED_TO if unknown), with no watch list, contact_type
+    caller and contact (TICKETING_ASSIGNED_TO if unknown) -- not the PI, unlike the customer tickets,
+    so the ticket stays out of the PI's view -- with no watch list, contact_type
     monitoring, and no assignee, so it waits in the group queue. Its text is internal (description,
     work_notes), so no customer is emailed.
 

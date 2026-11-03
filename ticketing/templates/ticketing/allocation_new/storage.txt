@@ -1,10 +1,14 @@
 {% autoescape off %}Hello,
 
-Your new allocation on {{ resource.name }} for project {{ project.title }} is now active.{% if quota %}
-Quota: {{ quota }}{% endif %}{% if path %}
-Path:  {{ path }}{% endif %}
+The {{ resource.name }} storage allocation for project "{{ project.title }}" has been created.{% include "ticketing/partials/storage_details.txt" %}
 
-{% include "ticketing/partials/notifications.txt" %}
+{% include "ticketing/partials/allocation_link.txt" %}
+
+{% include "ticketing/partials/rcrm.txt" %}
+
+{% if resource.requires_payment %}{% include "ticketing/partials/charge_back.txt" %}
+
+{% endif %}Please visit the TTS Research Technology Guides (https://rtguides.it.tufts.edu/) or email TTS-Research@tufts.edu for additional support.
 
 Thank you,
 

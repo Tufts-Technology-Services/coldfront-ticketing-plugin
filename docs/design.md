@@ -43,6 +43,7 @@ identified by a deterministic `correlation_id`:
 | An allocation change request | `coldfront:allocation-change:<pk>` |
 | A storage job failing for either | the request's, plus `:storage-failed` |
 | A day's changes to a project's users | `coldfront:project-users:<project pk>:<YYYY-MM-DD>` |
+| A user added to a project, that day | `coldfront:project-user-added:<project pk>:<username>:<YYYY-MM-DD>` |
 | An HPC account | `coldfront:hpc-account:<username>` |
 
 The plugin writes the `correlation_id` onto the incident it files, so every task can find "the
@@ -68,7 +69,8 @@ tasks and linking all use, so each kind of request is described in one place.
 | The storage plugin reports that it provisioned the request | The incident is resolved with a customer message. |
 | A request the storage plugin doesn't provision is approved | The incident is resolved with a generic customer message. |
 | The storage plugin reports a failure | An admin-only child ticket is filed. A later success resolves it too. |
-| A project's users change | One already-resolved notice per project per day. |
+| A project's users change | One already-resolved notice per project per day, for the PI and Approvers. |
+| A user is added to a project | An already-resolved notice to that user, telling them how to reach the project's storage. |
 | An HPC signup has to wait because the user had no UID | A ticket opens, telling the user their request was received. |
 | An HPC account is provisioned | The user is welcomed, and the request's ticket resolved (or one filed already resolved). |
 | Setting up an HPC account fails | An admin-only child ticket is filed. A later success resolves it too. |
@@ -116,7 +118,8 @@ storage exists. Ideally the storage plugin would expose that rule itself.
 ### When a storage job fails
 
 A failure (`share_creation_failed` or `quota_update_failed`) files a child of the request's incident
-(ServiceNow's `parent` field), with only the approving admin on it, so no customer is emailed. Its
+(ServiceNow's `parent` field), with only the approving admin on it, as caller and contact person,
+so no customer is emailed or sees it. (It's the one allocation ticket whose caller isn't the PI.) Its
 text is internal: what failed, the reason the storage plugin gave, the project and resource, and how
 to run the job again. There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
@@ -131,6 +134,19 @@ project have changed") per project per day, adds and removes together. ColdFront
 nothing. Within one request only the first signal queues a task, since tasks queued together could
 each look for the day's ticket before any had filed it. Changes to ticketing admins, and to the
 project's PI, file nothing.
+
+Each user added also gets a notice of their own, from `create_project_user_added_ticket`, queued
+for every `project_activate_user` with the same skips. A comment emails the contact person and the
+watch list alike, so a message for the new member can't share a ticket with the PI and Approvers'
+notice. It's a separate incident, filed already resolved, with the added user as contact person
+(ServiceNow emails the contact person, not the caller), the PI as caller as on every project ticket,
+and nobody watch-listed. Whoever added them
+decides `contact_type` but isn't on the ticket. Its message
+(`project_user_added_notification.txt`) says they've been added, points to the storage access guides
+and RCRM, and warns that access can take an hour or two to appear. One per user, project and day, so
+a re-run or a same-day re-add sends nothing more; each user's ticket is its own, so the tasks don't
+race as the project notice's would. It has no `parent`: it stands on its own, as the HPC account
+ticket does. Removed users get no notice of their own.
 
 ### HPC account tickets
 
@@ -188,11 +204,16 @@ place and files nothing.
 
 ## Who is on a ticket
 
-- **Contact person** (`u_contact_person`): the requestor, whoever submitted the request.
-- **Caller** (`caller_id`): who the request is for. ServiceNow notifies the caller. Without an
-  explicit affected client it's the requestor. Without a known requestor (outside a web request)
-  the PI stands in.
-- **Watch list:** the project's PI and its Managers, less whoever is already on the ticket.
+- **Who is emailed:** ServiceNow emails a customer-visible comment to the contact person and the
+  watch list, **not the caller** (Tufts' "End User" incident notifications). So anyone who must
+  hear is one of those.
+- **Contact person** (`u_contact_person`): the requestor, whoever submitted the request. On a
+  notice for one person (an added project member, a group change), that person.
+- **Caller** (`caller_id`): the project's PI, on every ticket about an allocation or a project.
+  Tufts calls this field the Affected Client. The exceptions are admin-only failure tickets, whose
+  caller is the approving admin, and HPC account tickets, which have no project and have the user.
+- **Without a known requestor** (outside a web request) the PI stands in as contact person too.
+- **Watch list:** the project's PI and its Managers, less the contact person.
   Managers count only while Active with notifications enabled, the same filter ColdFront's own
   project emails use; the PI is always included. A watcher ServiceNow doesn't know is left off
   rather than failing the ticket.
@@ -217,9 +238,26 @@ the link form), whose requests open no ticket, and who is left out of project no
   summarise the request: project, PI, requester, resource, attributes and the justification, with a
   link back to ColdFront.
 - **Customer messages** are chosen by resource: the first of `<folder>/<resource name>.txt`,
-  `<folder>/<resource type>.txt` and `<folder>/generic.txt` that exists. Storage has its own
-  messages (a new share, a quota change). Everything else gets the generic ones, so a resource that
-  needs its own wording only needs a template named after it or its type.
+  `<folder>/<alias>.txt`, `<folder>/<resource type>.txt` and `<folder>/generic.txt` that exists
+  (names slugified). The alias is another resource's name, from `TICKETING_RESOURCE_TEMPLATE_ALIASES`,
+  so variants of a resource (a staff or course copy of a storage tier) share its messages rather
+  than each needing a copy. Everything else gets the generic ones, so a resource that needs its own
+  wording only needs a template named after it or its type.
+- **Storage messages:** a new allocation on each storage tier has its own message
+  (`allocation_new/tier-1-hpc.txt`, `tier-1-rstore.txt`, `tier-2-research.txt`), with the tier's
+  access guide, and HPC course storage has `allocation_new/course-tier-1-hpc.txt`, which explains
+  the class folders and names the class and admin groups (the allocation's or else the project's
+  `Group`, and that plus `admin`, as the storage plugin creates them). Other storage resources get
+  `allocation_new/storage.txt`. Every quota change gets
+  `allocation_update/storage.txt`, naming the resource and the old and new quota. They share the
+  RCRM and charge-back paragraphs (`partials/rcrm.txt`, `partials/charge_back.txt`; the charge-back
+  only for a resource that `requires_payment`) and list the
+  allocation's path (`Storage Path`) and quota where it has them. On RStore, `Storage Path` holds
+  the SMB URL (`smb://...`) and `Storage Path (Windows)` the Windows form; the RStore message lists
+  them as the Mac OS and Windows OS paths, leaving out whichever the allocation doesn't have.
+- **Customer messages link the allocation's page** ("View this allocation in RCRM: ..."), new
+  allocations and completed changes alike, generic messages included (`partials/allocation_link.txt`).
+  Links are built from ColdFront's `CENTER_BASE_URL`, so it has to be ColdFront's own address.
 - **Only attributes the customer can see** (whose type isn't marked private) are listed, in
   customer messages and request descriptions alike: the PI and Managers are on those tickets.
 - **Attribute names are made readable:** `slurm_account_name` becomes "Slurm account name". Known

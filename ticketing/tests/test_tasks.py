@@ -9,6 +9,7 @@ from django.utils import timezone
 from ticketing import client as servicenow
 from ticketing import slots, tasks
 from ticketing.client import IncidentRef
+from ticketing.models import FiledTicket
 from ticketing.tests.test_allocation_updates import FakeServiceNow, make_storage_allocation, make_storage_change
 
 
@@ -178,8 +179,7 @@ def test_group_membership_files_a_resolved_incident_for_the_added_user(requestor
     assert add_to_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
-    assert ticket.caller_id == "jdoe01"
-    assert ticket.u_contact_person == "asmith02"
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"  # the contact person is emailed
     assert ticket.watch_list == ["asmith02"]
     assert ticket.contact_type == "self-service"
     assert ticket.short_description == "Tier 1 HPC Storage: Grant Access to /cluster/tufts/smith_lab/jdoe01"
@@ -218,7 +218,8 @@ def test_group_membership_added_by_a_superuser_is_on_their_behalf(requestor, dja
     add_to_group("admin01")
 
     [ticket] = fake_client.created
-    assert ticket.u_contact_person == "admin01"
+    assert ticket.u_contact_person == "jdoe01"
+    assert ticket.watch_list == ["admin01"]
     assert ticket.contact_type == "email"
 
 
@@ -242,8 +243,7 @@ def test_group_removal_files_a_resolved_incident_for_the_removed_user(requestor,
     assert remove_from_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
-    assert ticket.caller_id == "jdoe01"
-    assert ticket.u_contact_person == "asmith02"
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02"]
     assert ticket.contact_type == "self-service"
     assert ticket.short_description == "Tier 1 HPC Storage: Remove Access to /cluster/tufts/smith_lab"
@@ -317,7 +317,8 @@ def test_files_a_resolved_notice_for_the_project(project, requestor, fake_client
 
     assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
-    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
+    assert ticket.caller_id == "asmith02"  # the PI is always the Affected Client
+    assert ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02", "bjones03"]  # the PI and the Approver
     assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
     assert ticket.short_description == "Project Users Changed | Genomics Lab"
@@ -372,6 +373,107 @@ def test_a_change_on_a_later_day_files_a_new_notice(project, today, fake_client)
     assert [ticket.correlation_id for ticket in fake_client.created] == [
         f"coldfront:project-users:{project.pk}:2026-09-28",
         f"coldfront:project-users:{project.pk}:2026-09-29",
+    ]
+
+
+# -- A user added to a project ------------------------------------------------------------------
+
+
+@pytest.fixture
+def added(project):
+    """A user just added to `project`."""
+    user = f.UserFactory(username="cnew04")
+    f.ProjectUserFactory(project=project, user=user, role=f.ProjectUserRoleChoiceFactory(name="User"))
+    return user
+
+
+def test_tells_the_added_user_and_closes_the_ticket(project, added, requestor, fake_client):
+    incident = tasks.create_project_user_added_ticket(project.pk, added.pk, requestor_pk=requestor.pk)
+
+    assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
+    [ticket] = fake_client.created
+    # ServiceNow emails the comment to the contact person; the PI is the Affected Client
+    assert ticket.caller_id == "asmith02" and ticket.u_contact_person == "cnew04"
+    assert ticket.watch_list is None  # the PI and Approvers get the project notice instead
+    assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
+    assert ticket.short_description == "Added to Project | Genomics Lab"
+    assert ticket.u_business_service == "Research Data Storage"
+    assert ticket.u_action == "Move/Add/Change"
+    assert ticket.assigned_to == "svc_test"
+    assert ticket.state == "6" and ticket.close_code == "Solved Remotely (Permanently)"
+    assert ticket.close_notes == "User added to project."
+    assert ticket.correlation_id == f"coldfront:project-user-added:{project.pk}:cnew04:2026-09-28"
+
+
+def test_added_user_message_names_the_project_and_the_storage_guides(project, added, fake_client):
+    tasks.create_project_user_added_ticket(project.pk, added.pk)
+
+    comments = fake_client.created[0].comments
+    assert comments.startswith("Hello,")
+    assert 'You have been added to project "Genomics Lab".' in comments
+    assert "1-2 hrs for your Tufts credentials to propagate" in comments
+    assert "10-tier1-hpc.html#access-methods" in comments
+    assert "https://rcrm.it.tufts.edu/" in comments
+    assert "TTS-Research@tufts.edu" in comments
+    assert "Research Technology (RT)" in comments  # footer
+    assert "&amp;" not in comments and "{%" not in comments
+
+
+def test_added_by_the_pi_is_self_service(project, added, pi, fake_client):
+    tasks.create_project_user_added_ticket(project.pk, added.pk, requestor_pk=pi.pk)
+
+    [ticket] = fake_client.created
+    assert ticket.caller_id == "asmith02" and ticket.u_contact_person == "cnew04"
+    assert ticket.contact_type == "self-service"
+
+
+def test_added_user_without_a_requestor_is_self_service_for_the_pi(project, added, fake_client):
+    tasks.create_project_user_added_ticket(project.pk, added.pk)
+
+    [ticket] = fake_client.created
+    assert ticket.u_contact_person == "cnew04" and ticket.contact_type == "self-service"
+
+
+def test_added_user_is_recorded_about_the_project_and_the_user(project, added, fake_client):
+    tasks.create_project_user_added_ticket(project.pk, added.pk)
+
+    filed = FiledTicket.objects.get()
+    assert filed.kind == FiledTicket.Kind.PROJECT_USER_ADDED
+    assert filed.project == project and filed.user == added
+    assert filed.resolved_at is not None
+
+
+def test_a_rerun_the_same_day_sends_nothing(project, added, fake_client):
+    tasks.create_project_user_added_ticket(project.pk, added.pk)
+    fake_client.looked_up.clear()
+
+    assert tasks.create_project_user_added_ticket(project.pk, added.pk) == IncidentRef(
+        sys_id="i-1", number="INC0000001"
+    )
+    assert len(fake_client.created) == 1
+    assert fake_client.looked_up == []  # answered from the local record
+
+
+def test_added_user_already_told_in_servicenow_is_left_alone(project, added, use_client):
+    existing = IncidentRef(sys_id="i-0", number="INC0000000", state="6")
+    client = use_client(FakeClient(existing=existing))
+
+    assert tasks.create_project_user_added_ticket(project.pk, added.pk) == existing
+    assert client.created == [] and client.updated == []
+
+
+def test_each_user_and_project_gets_its_own_ticket(project, added, pi, fake_client):
+    other = f.ProjectFactory(pi=pi, title="Other Lab")
+    second = f.UserFactory(username="dnew05")
+
+    tasks.create_project_user_added_ticket(project.pk, added.pk)
+    tasks.create_project_user_added_ticket(project.pk, second.pk)
+    tasks.create_project_user_added_ticket(other.pk, added.pk)
+
+    assert [ticket.correlation_id for ticket in fake_client.created] == [
+        f"coldfront:project-user-added:{project.pk}:cnew04:2026-09-28",
+        f"coldfront:project-user-added:{project.pk}:dnew05:2026-09-28",
+        f"coldfront:project-user-added:{other.pk}:cnew04:2026-09-28",
     ]
 
 

@@ -1,0 +1,28 @@
+{% autoescape off %}Hello,
+
+The Tier 1 HPC class storage for "{{ project.title }}" has been created. Please reference the self-service guidance below for storage access. NOTE: It may take 24 hrs for your Tufts credentials to propagate, before you can access the new storage.{% include "ticketing/partials/storage_details.txt" %}
+
+{% include "ticketing/partials/allocation_link.txt" %}
+
+The permission setting for class folders is unique. There are two groups for the class: an admin group{% if admin_group %} ({{ admin_group }}){% endif %}, which only includes instructors and TAs, and a general class group{% if group %} ({{ group }}){% endif %}, which includes everyone in the class.
+
+This setup controls folder access as follows:
+- Students can't read each other's folders.
+- Students have access to their own folder and the shared folder{% if path %} ({{ path }}/shared){% endif %}.
+- Please store the files you need to share with all students (instructions, demo files, sample scripts, reference data, etc.) in the shared folder.
+- Instructors and TAs have access to all folders: their own, the students', and the shared folder.
+
+You and your TAs can now start working in the class folder to prepare for the new semester.
+
+Tiered Storage Allocation Self-Service Access Guides
+Tier 1 HPC (https://rtguides.it.tufts.edu/storage/systems/10-tier1-hpc.html#access-methods)
+
+{% include "ticketing/partials/rcrm.txt" %}
+
+{% if resource.requires_payment %}{% include "ticketing/partials/charge_back.txt" %}
+
+{% endif %}Please visit the TTS Research Technology Guides (https://rtguides.it.tufts.edu/) or email TTS-Research@tufts.edu for additional support.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

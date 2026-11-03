@@ -59,9 +59,11 @@ def _row(ticket, by_correlation_id, resources) -> TicketRow:
     elif ticket.allocation:
         about, url = about_allocation(ticket.allocation), ticket.allocation.get_absolute_url()
     elif ticket.project:
-        # A project user notice's correlation_id ends with the day it covers.
+        # A project user notice's correlation_id ends with the day it covers. An added user's notice
+        # is about the user too.
         day = ticket.correlation_id.rsplit(":", 1)[-1]
-        about, url = f"{ticket.project.title}, {day}", ticket.project.get_absolute_url()
+        who = f"{ticket.user.username} on " if ticket.user else ""
+        about, url = f"{who}{ticket.project.title}, {day}", ticket.project.get_absolute_url()
     elif ticket.user:
         about, url = ticket.user.username, None
     else:

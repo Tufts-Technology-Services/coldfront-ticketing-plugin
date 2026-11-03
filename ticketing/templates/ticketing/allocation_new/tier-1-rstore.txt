@@ -1,0 +1,21 @@
+{% autoescape off %}Hello,
+
+The Tier 1 RStore storage allocation for project "{{ project.title }}" has been created. Please reference the self-service guidance below for storage access. NOTE: It may take 24 hrs for your Tufts credentials to propagate, before you can access the new storage.{% include "ticketing/partials/storage_details.txt" with path=None %}
+
+{% include "ticketing/partials/allocation_link.txt" %}
+
+Tiered Storage Allocation Self-Service Access Guides
+Tier 1 RStore (https://rtguides.it.tufts.edu/storage/systems/20-tier1-rstore.html#access-methods)
+{% if path or windows_path %}{% if path %}
+Mac OS: {{ path }}{% endif %}{% if windows_path %}
+Windows OS: {{ windows_path }}{% endif %}
+{% endif %}
+{% include "ticketing/partials/rcrm.txt" %}
+
+{% if resource.requires_payment %}{% include "ticketing/partials/charge_back.txt" %}
+
+{% endif %}Please visit the TTS Research Technology Guides (https://rtguides.it.tufts.edu/) or email TTS-Research@tufts.edu for additional support.
+
+Thank you,
+
+{% include "ticketing/partials/footer.txt" %}{% endautoescape %}

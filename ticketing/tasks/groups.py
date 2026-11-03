@@ -74,11 +74,12 @@ def _group_ticket(
 
     Ticketing admins get no ticket (returns None): they're staff, not customers of the group.
 
-    The notification goes in the customer-visible `comments`, so ServiceNow emails the user, who is
-    the caller. `requestor_username` is whoever asked for the change -- typically the PI or a
-    manager; they become the contact person and are watch-listed. Without it the user stands in. A
-    ticketing-admin requestor (ticketing.permissions) is taken to be an administrator acting on someone's behalf
-    (contact_type email).
+    The notification goes in the customer-visible `comments`, which ServiceNow emails to the contact
+    person and the watch list (not the caller), so the user is caller and contact person.
+    `requestor_username` is whoever asked for the change -- typically the PI or a manager; they are
+    watch-listed, and decide contact_type: a ticketing-admin requestor (ticketing.permissions) is
+    taken to be an administrator acting on someone's behalf (contact_type email). Without a
+    requestor the user stands in.
 
     Group and paths are passed in by whatever made the change, so this plugin needn't know the
     cluster layout. Safe to re-run the same day: an incident already filed today for this change,
@@ -103,7 +104,7 @@ def _group_ticket(
 
     on_behalf = requestor.pk != user.pk and is_ticketing_admin(requestor)
     payload = ServiceNowIncident(
-        u_contact_person=requestor.username,
+        u_contact_person=user.username,
         caller_id=user.username,
         watch_list=[requestor.username] if requestor.pk != user.pk else None,
         contact_type=CONTACT_TYPE_EMAIL if on_behalf else CONTACT_TYPE_SELF_SERVICE,

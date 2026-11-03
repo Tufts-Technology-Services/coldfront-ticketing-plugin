@@ -315,6 +315,22 @@ def test_a_project_user_notice_shows_its_day(pi, admin):
 
 
 @override_settings(SERVICENOW_URL=SNOW)
+def test_an_added_user_notice_shows_who_and_its_day(pi, admin):
+    project = f.ProjectFactory(pi=pi, title="Genomics Lab")
+    added = f.UserFactory(username="cnew04")
+    file_ticket(
+        f"coldfront:project-user-added:{project.pk}:cnew04:2026-10-10",
+        FiledTicket.Kind.PROJECT_USER_ADDED,
+        project=project,
+        user=added,
+    )
+
+    card = render_card(admin, project)
+    assert "Added to project:" in card
+    assert "cnew04 on Genomics Lab, 2026-10-10" in card
+
+
+@override_settings(SERVICENOW_URL=SNOW)
 def test_linked_tickets_are_marked_with_who_and_when(pi, admin):
     allocation, _ = make_storage_allocation(pi)
     ticket = file_ticket(f"coldfront:allocation:{allocation.pk}", allocation=allocation)
