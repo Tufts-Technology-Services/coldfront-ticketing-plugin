@@ -84,7 +84,7 @@ def resolve_hpc_account_ticket(username: str, home_path: str) -> IncidentRef:
     """Welcome the user to their new HPC account, and close out its ticket.
 
     Mirrors the "HPC Account Creation" incidents staff file today: the welcome text goes in
-    `comments` (the customer-visible journal ServiceNow notifies the caller from) and a short staff
+    `comments` (the customer-visible journal ServiceNow emails the contact person from) and a short staff
     note in `close_notes`. Resolves the incident create_hpc_account_ticket opened, if there is one;
     for the usual account, which had a UID all along, there isn't, so one is filed already
     resolved. Safe to re-run: an incident already resolved is left alone.

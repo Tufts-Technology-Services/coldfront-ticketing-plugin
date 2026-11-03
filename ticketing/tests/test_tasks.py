@@ -179,8 +179,7 @@ def test_group_membership_files_a_resolved_incident_for_the_added_user(requestor
     assert add_to_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
-    assert ticket.caller_id == "jdoe01"
-    assert ticket.u_contact_person == "asmith02"
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"  # the contact person is emailed
     assert ticket.watch_list == ["asmith02"]
     assert ticket.contact_type == "self-service"
     assert ticket.short_description == "Tier 1 HPC Storage: Grant Access to /cluster/tufts/smith_lab/jdoe01"
@@ -219,7 +218,8 @@ def test_group_membership_added_by_a_superuser_is_on_their_behalf(requestor, dja
     add_to_group("admin01")
 
     [ticket] = fake_client.created
-    assert ticket.u_contact_person == "admin01"
+    assert ticket.u_contact_person == "jdoe01"
+    assert ticket.watch_list == ["admin01"]
     assert ticket.contact_type == "email"
 
 
@@ -243,8 +243,7 @@ def test_group_removal_files_a_resolved_incident_for_the_removed_user(requestor,
     assert remove_from_group("asmith02") == IncidentRef(sys_id="i-1", number="INC0000001")
 
     [ticket] = fake_client.created
-    assert ticket.caller_id == "jdoe01"
-    assert ticket.u_contact_person == "asmith02"
+    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02"]
     assert ticket.contact_type == "self-service"
     assert ticket.short_description == "Tier 1 HPC Storage: Remove Access to /cluster/tufts/smith_lab"
@@ -318,7 +317,8 @@ def test_files_a_resolved_notice_for_the_project(project, requestor, fake_client
 
     assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
-    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
+    assert ticket.caller_id == "asmith02"  # the PI is always the Affected Client
+    assert ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02", "bjones03"]  # the PI and the Approver
     assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
     assert ticket.short_description == "Project Users Changed | Genomics Lab"
@@ -392,8 +392,8 @@ def test_tells_the_added_user_and_closes_the_ticket(project, added, requestor, f
 
     assert incident == IncidentRef(sys_id="i-1", number="INC0000001")
     [ticket] = fake_client.created
-    assert ticket.caller_id == "cnew04"  # ServiceNow emails the caller the comment
-    assert ticket.u_contact_person == "jdoe01"
+    # ServiceNow emails the comment to the contact person; the PI is the Affected Client
+    assert ticket.caller_id == "asmith02" and ticket.u_contact_person == "cnew04"
     assert ticket.watch_list is None  # the PI and Approvers get the project notice instead
     assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
     assert ticket.short_description == "Added to Project | Genomics Lab"
@@ -419,18 +419,19 @@ def test_added_user_message_names_the_project_and_the_storage_guides(project, ad
     assert "&amp;" not in comments and "{%" not in comments
 
 
-def test_added_by_the_pi_is_self_service_and_the_pi_is_contact(project, added, pi, fake_client):
+def test_added_by_the_pi_is_self_service(project, added, pi, fake_client):
     tasks.create_project_user_added_ticket(project.pk, added.pk, requestor_pk=pi.pk)
 
     [ticket] = fake_client.created
-    assert ticket.caller_id == "cnew04" and ticket.u_contact_person == "asmith02"
+    assert ticket.caller_id == "asmith02" and ticket.u_contact_person == "cnew04"
     assert ticket.contact_type == "self-service"
 
 
-def test_added_user_without_a_requestor_has_the_pi_as_contact(project, added, fake_client):
+def test_added_user_without_a_requestor_is_self_service_for_the_pi(project, added, fake_client):
     tasks.create_project_user_added_ticket(project.pk, added.pk)
 
-    assert fake_client.created[0].u_contact_person == "asmith02"
+    [ticket] = fake_client.created
+    assert ticket.u_contact_person == "cnew04" and ticket.contact_type == "self-service"
 
 
 def test_added_user_is_recorded_about_the_project_and_the_user(project, added, fake_client):

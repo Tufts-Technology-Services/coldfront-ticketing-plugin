@@ -80,7 +80,8 @@ Ticketing admins (see "Ticketing admins" below) are skipped too: they aren't pro
 to notify. See "Project user notices" in `docs/design.md`.
 
 **Each user added also gets a notice of their own.** It's a separate already-resolved incident with
-the added user as caller, so ServiceNow emails them the message
+the added user as contact person, so ServiceNow emails them the message (it emails the contact
+person and watch list, not the caller, who is the PI as on every project ticket)
 (`project_user_added_notification.txt`): they've been added to the project, where the storage access
 guides are, and that access can take an hour or two to appear. Nobody is watch-listed, since the PI
 and Approvers get the project notice instead. Adding five users files five of these. Removed users

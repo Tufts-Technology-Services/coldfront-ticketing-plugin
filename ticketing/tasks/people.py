@@ -1,7 +1,9 @@
 """Who is on a ticket about a project, and who approved a request.
 
-The requestor is the contact person; the affected client is the caller; the PI and Approvers are
-watch-listed (people_fields). Approvers are found in a request's simple-history (request_approver).
+The requestor is the contact person; the PI is the caller (the Affected Client, at Tufts); the PI
+and Approvers are watch-listed (people_fields). ServiceNow emails a customer-visible comment to the contact person and
+the watch list, not the caller (the Tufts "End User" notifications), so anyone who must hear is one
+of those. Approvers are found in a request's simple-history (request_approver).
 """
 
 from django.contrib.auth import get_user_model
@@ -31,8 +33,8 @@ def contact_type_for(user, project) -> str:
 def project_watchers(project, *people) -> list[str]:
     """UTLNs to watch-list on a ticket about `project`: its PI and Approvers, less `people`.
 
-    `people` are the users already on the ticket (the contact person and affected client), who
-    needn't watch it too. "Approver" is Tufts' label for ColdFront's Manager role. So a PI's request
+    `people` are the users already emailed from the ticket (the contact person), who needn't watch
+    it too. "Approver" is Tufts' label for ColdFront's Manager role. So a PI's request
     watch-lists the Approvers, an Approver's request the PI and the other Approvers, and an
     administrator's request all of them. As in core's Project.get_user_emails, the PI is always
     included and Approvers only while Active with notifications enabled for the project.
@@ -47,22 +49,22 @@ def project_watchers(project, *people) -> list[str]:
     return [username for username in dict.fromkeys([project.pi.username, *approvers]) if username not in on_ticket]
 
 
-def people_fields(project, requestor_pk, affected_pk=None):
-    """The requestor, and the ServiceNowIncident people fields for a request about `project`.
+def people_fields(project, requestor_pk):
+    """The requestor, and the ServiceNowIncident people fields for a ticket about `project`.
 
-    The requestor -- whoever submitted the request -- is the contact person (u_contact_person) and
-    decides contact_type. The affected client (caller_id) is who the request is for, which ServiceNow
-    notifies; without `affected_pk` it is the requestor. Without `requestor_pk` (the signals don't
-    carry it until the companion core change lands), the PI stands in. Everyone else in charge of the
-    project is watch-listed (project_watchers).
+    The PI is the caller (caller_id): Tufts' Affected Client on anything about an allocation or a
+    project. The requestor -- whoever submitted the request -- is the contact person
+    (u_contact_person) and decides contact_type. Without `requestor_pk` (the signals don't carry it
+    until the companion core change lands), the PI stands in. ServiceNow emails the contact person
+    and the watch list but not the caller, so the PI is watch-listed unless they're the contact,
+    along with the project's Approvers (project_watchers).
     """
     User = get_user_model()
     requestor = User.objects.get(pk=requestor_pk) if requestor_pk else project.pi
-    affected = User.objects.get(pk=affected_pk) if affected_pk else requestor
     fields = {
         "u_contact_person": requestor.username,
-        "caller_id": affected.username,
-        "watch_list": project_watchers(project, requestor, affected) or None,
+        "caller_id": project.pi.username,
+        "watch_list": project_watchers(project, requestor) or None,
         "contact_type": contact_type_for(requestor, project),
     }
     return requestor, fields

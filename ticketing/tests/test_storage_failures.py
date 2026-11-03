@@ -51,6 +51,7 @@ def test_a_failed_share_files_an_admin_only_child_of_the_request(pi, requestor, 
 
     _, ticket = failure_of(snow, f"coldfront:allocation:{allocation.pk}")
     assert ticket["parent"] == request.number
+    # admins only: the approving admin, not the PI, is the caller here
     assert ticket["caller_id"] == ticket["u_contact_person"] == "admin01"
     assert ticket["watch_list"] is None
     assert ticket["assigned_to"] is None  # waits in the group queue
@@ -92,7 +93,7 @@ def test_a_failed_quota_change_names_the_change_requests_approver(
 
     _, ticket = failure_of(snow, f"coldfront:allocation-change:{change.pk}")
     assert ticket["parent"] == request.number
-    assert ticket["caller_id"] == "admin02"
+    assert ticket["caller_id"] == ticket["u_contact_person"] == "admin02"
     assert ticket["u_action"] == "Move/Add/Change"
     assert "Quota change" in ticket["description"]
     assert FiledTicket.objects.get(kind=FiledTicket.Kind.STORAGE_FAILURE).allocation_change == change
@@ -117,7 +118,7 @@ def test_an_approver_servicenow_doesnt_know_falls_back_to_the_service_account(
     tasks.file_storage_failure_ticket(allocation.pk)
 
     _, ticket = failure_of(snow, f"coldfront:allocation:{allocation.pk}")
-    assert ticket["caller_id"] == "svc_test"
+    assert ticket["caller_id"] == ticket["u_contact_person"] == "svc_test"
     assert "ServiceNow has no user admin01" in caplog.text
 
 

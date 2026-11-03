@@ -363,7 +363,8 @@ def test_files_a_resolved_incident_when_none_exists(pi, requestor, use_client):
     tasks.resolve_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
 
     [ticket] = client.created
-    assert ticket.caller_id == ticket.u_contact_person == "jdoe01"
+    assert ticket.caller_id == "asmith02"  # the PI is always the Affected Client
+    assert ticket.u_contact_person == "jdoe01"
     assert ticket.watch_list == ["asmith02"]  # the PI, since someone else asked
     assert ticket.contact_type == "email"  # jdoe01 isn't the PI or a Manager on the project
     assert ticket.short_description.startswith("Research Storage: Quota Change")
@@ -479,40 +480,28 @@ def test_approver_request_ticket_watches_the_pi_and_other_approvers(pi, project_
     tasks.create_allocation_ticket(allocation.pk, requestor_pk=approver.pk)
 
     _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
-    assert ticket["caller_id"] == "czhang04"
+    assert ticket["caller_id"] == "asmith02" and ticket["u_contact_person"] == "czhang04"
     assert ticket["watch_list"] == ["asmith02", "bjones03"]
     assert ticket["contact_type"] == "self-service"
 
 
-def test_affected_client_is_the_caller_and_the_requestor_the_contact(
+def test_an_admins_request_has_the_pi_as_caller_and_the_admin_as_contact(
     pi, project_with_approvers, django_user_model, use_client
 ):
     allocation, _ = make_storage_allocation(pi)
     allocation.project = project_with_approvers
     allocation.save()
     admin = django_user_model.objects.create_superuser(username="admin01", email="a@example.edu", password="pw")
-    approver = get_user_model().objects.get(username="bjones03")
     snow = use_client(FakeServiceNow())
 
-    tasks.create_allocation_ticket(allocation.pk, requestor_pk=admin.pk, affected_pk=approver.pk)
+    tasks.create_allocation_ticket(allocation.pk, requestor_pk=admin.pk)
 
     _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
+    assert ticket["caller_id"] == "asmith02"
     assert ticket["u_contact_person"] == "admin01"
-    assert ticket["caller_id"] == "bjones03"
-    assert ticket["watch_list"] == ["asmith02", "czhang04"]  # neither person already on the ticket
+    # ServiceNow emails the contact person and watch list, not the caller, so the PI watches too
+    assert ticket["watch_list"] == ["asmith02", "bjones03", "czhang04"]
     assert ticket["contact_type"] == "email"  # follows the requestor, an administrator
-
-
-def test_resolve_files_with_the_affected_client_as_caller(pi, requestor, use_client):
-    change = make_storage_change(pi)
-    client = use_client(FakeClient())
-
-    tasks.resolve_allocation_change_ticket(change.pk, requestor_pk=requestor.pk, affected_pk=pi.pk)
-
-    [ticket] = client.created
-    assert ticket.u_contact_person == "jdoe01"
-    assert ticket.caller_id == "asmith02"
-    assert ticket.watch_list is None  # the PI is the caller, and there are no Approvers
 
 
 # -- create_allocation_change_ticket -----------------------------------------------------------
@@ -562,7 +551,8 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
     assert ticket["state"] is None  # left for the instance to choose
     assert ticket["assigned_to"] is None  # waits in the group queue
     assert ticket["short_description"] == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
-    assert ticket["caller_id"] == "jdoe01" and ticket["watch_list"] == ["asmith02"]
+    assert ticket["caller_id"] == "asmith02" and ticket["u_contact_person"] == "jdoe01"
+    assert ticket["watch_list"] == ["asmith02"]
     assert ticket["u_business_service"] == "Research Data Storage"
     assert ticket["u_action"] == "Move/Add/Change"
     description = ticket["description"]
@@ -630,7 +620,8 @@ def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requesto
     assert ticket["short_description"] == (
         f"Research Storage: New Allocation Request | 10 TB | {allocation.project.title}"
     )
-    assert ticket["caller_id"] == "jdoe01" and ticket["watch_list"] == ["asmith02"]
+    assert ticket["caller_id"] == "asmith02" and ticket["u_contact_person"] == "jdoe01"
+    assert ticket["watch_list"] == ["asmith02"]
     assert ticket["u_action"] == "Activate/Setup/Install"
     assert ticket["u_business_service"] == "Research Data Storage"
     description = ticket["description"]

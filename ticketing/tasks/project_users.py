@@ -41,7 +41,7 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
     is none yet and one is filed already resolved; later changes that day find it resolved and send
     nothing. A ticket filed in ServiceNow and linked for the day (ticketing.linking) is still open,
     and is resolved with the message instead. People as for allocation requests (people_fields):
-    whoever made the change is caller and contact, the PI standing in without `requestor_pk`, and
+    the PI is caller, whoever made the change is contact, the PI standing in without `requestor_pk`, and
     the PI and Approvers are watch-listed.
     """
     project = Project.objects.select_related("pi").get(pk=project_pk)
@@ -69,9 +69,10 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
 def create_project_user_added_ticket(project_pk: int, user_pk: int, requestor_pk: int | None = None) -> IncidentRef:
     """Tell a user they've been added to a project, with how to reach its storage, and close out the ticket.
 
-    The user is the caller, so ServiceNow emails them the message (a customer-visible comment). Whoever
-    added them is the contact person and decides contact_type, the PI standing in without
-    `requestor_pk`. Nobody is watch-listed: the PI and Approvers hear from create_project_users_ticket,
+    The user is the contact person, since ServiceNow emails a customer-visible comment to the contact
+    person (not the caller); the PI is the caller, the Affected Client as on every project ticket.
+    Whoever added them decides contact_type, the PI standing in without `requestor_pk`, but isn't on
+    the ticket. Nobody is watch-listed: the PI and Approvers hear from create_project_users_ticket,
     and this message is for the new member. One per user, project and day, found by the
     correlation_id "coldfront:project-user-added:<project pk>:<utln>:<YYYY-MM-DD>" (in TIME_ZONE), so
     a re-run, or a re-add the same day, sends nothing more.
@@ -97,9 +98,9 @@ def create_project_user_added_ticket(project_pk: int, user_pk: int, requestor_pk
 
 
 def added_user_people(project, user, requestor_pk):
-    """people_fields with the added user as caller, and no watch list."""
-    requestor, fields = people_fields(project, requestor_pk, affected_pk=user.pk)
-    return requestor, {**fields, "watch_list": None}
+    """people_fields with the added user as contact person, and no watch list."""
+    requestor, fields = people_fields(project, requestor_pk)
+    return requestor, {**fields, "u_contact_person": user.username, "watch_list": None}
 
 
 def filed_today(slot: TicketSlot) -> IncidentRef | None:

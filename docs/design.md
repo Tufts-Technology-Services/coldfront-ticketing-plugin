@@ -118,7 +118,8 @@ storage exists. Ideally the storage plugin would expose that rule itself.
 ### When a storage job fails
 
 A failure (`share_creation_failed` or `quota_update_failed`) files a child of the request's incident
-(ServiceNow's `parent` field), with only the approving admin on it, so no customer is emailed. Its
+(ServiceNow's `parent` field), with only the approving admin on it, as caller and contact person,
+so no customer is emailed or sees it. (It's the one allocation ticket whose caller isn't the PI.) Its
 text is internal: what failed, the reason the storage plugin gave, the project and resource, and how
 to run the job again. There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
@@ -135,10 +136,12 @@ each look for the day's ticket before any had filed it. Changes to ticketing adm
 project's PI, file nothing.
 
 Each user added also gets a notice of their own, from `create_project_user_added_ticket`, queued
-for every `project_activate_user` with the same skips. A comment emails everyone on the ticket alike
-(the caller and the watch list), so a message for the new member can't share a ticket with the PI
-and Approvers' notice. It's a separate incident, filed already resolved, with the added user as
-caller, whoever added them as contact person, and nobody watch-listed. Its message
+for every `project_activate_user` with the same skips. A comment emails the contact person and the
+watch list alike, so a message for the new member can't share a ticket with the PI and Approvers'
+notice. It's a separate incident, filed already resolved, with the added user as contact person
+(ServiceNow emails the contact person, not the caller), the PI as caller as on every project ticket,
+and nobody watch-listed. Whoever added them
+decides `contact_type` but isn't on the ticket. Its message
 (`project_user_added_notification.txt`) says they've been added, points to the storage access guides
 and RCRM, and warns that access can take an hour or two to appear. One per user, project and day, so
 a re-run or a same-day re-add sends nothing more; each user's ticket is its own, so the tasks don't
@@ -201,11 +204,16 @@ place and files nothing.
 
 ## Who is on a ticket
 
-- **Contact person** (`u_contact_person`): the requestor, whoever submitted the request.
-- **Caller** (`caller_id`): who the request is for. ServiceNow notifies the caller. Without an
-  explicit affected client it's the requestor. Without a known requestor (outside a web request)
-  the PI stands in.
-- **Watch list:** the project's PI and its Managers, less whoever is already on the ticket.
+- **Who is emailed:** ServiceNow emails a customer-visible comment to the contact person and the
+  watch list, **not the caller** (Tufts' "End User" incident notifications). So anyone who must
+  hear is one of those.
+- **Contact person** (`u_contact_person`): the requestor, whoever submitted the request. On a
+  notice for one person (an added project member, a group change), that person.
+- **Caller** (`caller_id`): the project's PI, on every ticket about an allocation or a project.
+  Tufts calls this field the Affected Client. The exceptions are admin-only failure tickets, whose
+  caller is the approving admin, and HPC account tickets, which have no project and have the user.
+- **Without a known requestor** (outside a web request) the PI stands in as contact person too.
+- **Watch list:** the project's PI and its Managers, less the contact person.
   Managers count only while Active with notifications enabled, the same filter ColdFront's own
   project emails use; the PI is always included. A watcher ServiceNow doesn't know is left off
   rather than failing the ticket.
