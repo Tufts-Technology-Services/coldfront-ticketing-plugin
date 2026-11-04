@@ -4,6 +4,7 @@ from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
+from ticketing.tests.rendering import capture_templates
 from ticketing.tests.test_allocation_updates import FakeServiceNow
 
 pytestmark = pytest.mark.django_db
@@ -21,7 +22,8 @@ def snow(monkeypatch):
 def test_a_failure_files_an_admin_only_child_of_the_account_ticket(requestor, snow):
     request = tasks.create_hpc_account_ticket("jdoe01")
 
-    incident = tasks.file_hpc_account_failure_ticket("jdoe01", "pyinfra could not reach the filesystem host")
+    with capture_templates() as rendered:
+        incident = tasks.file_hpc_account_failure_ticket("jdoe01", "pyinfra could not reach the filesystem host")
 
     _, ticket = snow.incidents[FAILURE]
     assert ticket["parent"] == request.number
@@ -31,9 +33,10 @@ def test_a_failure_files_an_admin_only_child_of_the_account_ticket(requestor, sn
     assert ticket["comments"] is None  # nothing customer-visible
     assert ticket["contact_type"] == "monitoring"
     assert ticket["short_description"] == "HPC Account Setup Failed | jdoe01"
-    assert "Reason:   pyinfra could not reach the filesystem host" in ticket["description"]
-    assert f"Request:  {request.number}" in ticket["description"]
-    assert 'provision_hpc_account("jdoe01")' in ticket["description"]
+    context = rendered.context("ticketing/hpc_account_failure.txt")
+    expected = ("pyinfra could not reach the filesystem host", request.number)
+    assert (context["reason"], context["parent"].number) == expected
+    assert all(value in ticket["description"] for value in (*expected, "jdoe01"))
     record = FiledTicket.objects.get(correlation_id=FAILURE)
     assert (record.kind, record.number, record.user) == (
         FiledTicket.Kind.HPC_ACCOUNT_FAILURE,
@@ -45,11 +48,12 @@ def test_a_failure_files_an_admin_only_child_of_the_account_ticket(requestor, sn
 
 def test_without_an_account_ticket_it_has_no_parent(requestor, snow):
     """The usual case: the account didn't have to wait for a UID, so no ticket was opened for it."""
-    tasks.file_hpc_account_failure_ticket("jdoe01", "could not add them to the access group")
+    with capture_templates() as rendered:
+        tasks.file_hpc_account_failure_ticket("jdoe01", "could not add them to the access group")
 
     _, ticket = snow.incidents[FAILURE]
     assert ticket["parent"] is None
-    assert "no ticket: the account didn't have to wait for a UID" in ticket["description"]
+    assert rendered.context("ticketing/hpc_account_failure.txt")["parent"] is None
 
 
 def test_a_repeat_failure_adds_a_work_note_instead_of_another_ticket(requestor, snow):

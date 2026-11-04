@@ -9,6 +9,8 @@ list.
 
 Also sent for TTS Staff - Tier 1 RStore and Course - Tier 1 RStore, without the charge-back paragraph. The Mac OS and Windows OS lines are the `Storage Path` and `Storage Path (Windows)` attributes; either is left out if the allocation doesn't have it.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Resolved
 
 | Field | Value |
@@ -36,6 +38,8 @@ Mac OS: smb://rstore.it.tufts.edu/smithlab$
 Windows OS: \\rstore.it.tufts.edu\smithlab$
 
 Research Computing Resource Manager (RCRM): The RCRM is now available at https://rcrm.it.tufts.edu/, providing owners and approvers with self-service tools to manage user access, request research storage quota adjustment, and update billing information for tiered research storage charge-backs. Please see the Research Technology Guides RCRM for detailed instructions. https://rtguides.it.tufts.edu/storage/rcrm/index.html
+
+NOTE: Only RT can access and move data to/from Tier 3. 
 
 Interested in a quick demo? Go to the link below to schedule an RCRM consultation to learn how to make the most of these self-service features.
 https://outlook.office.com/book/RDMSSupport@tufts.edu

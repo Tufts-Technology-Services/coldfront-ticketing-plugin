@@ -5,7 +5,9 @@ When: the storage plugin has applied an approved quota change (`quota_update_suc
 ColdFront resolves the [quota change request](10-quota-change-request.md)'s ticket with this
 message: here the Approver who asked is the contact person, and the PI is on the watch list.
 
-The same message as for [Tier 1 HPC](11-quota-change-made-tier-1-hpc.md), naming the RStore share's `Storage Path`.
+The same message as for [Tier 1 HPC](11-quota-change-made-tier-1-hpc.md), naming the RStore resource.
+
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
 
 ### Resolved
 
@@ -21,11 +23,13 @@ The same message as for [Tier 1 HPC](11-quota-change-made-tier-1-hpc.md), naming
 ```text
 Hello,
 
-The Tier 1 RStore storage allocation for project "Smith Lab" (smb://rstore.it.tufts.edu/smithlab$) has been adjusted from 5 TB to 8 TB.
+The Tier 1 RStore storage allocation for project "Smith Lab" has been adjusted from 5 TB to 8 TB.
 
 View this allocation in RCRM: https://rcrm.it.tufts.edu/allocation/1/
 
 Research Computing Resource Manager (RCRM): The RCRM is now available at https://rcrm.it.tufts.edu/, providing owners and approvers with self-service tools to manage user access, request research storage quota adjustment, and update billing information for tiered research storage charge-backs. Please see the Research Technology Guides RCRM for detailed instructions. https://rtguides.it.tufts.edu/storage/rcrm/index.html
+
+NOTE: Only RT can access and move data to/from Tier 3. 
 
 Interested in a quick demo? Go to the link below to schedule an RCRM consultation to learn how to make the most of these self-service features.
 https://outlook.office.com/book/RDMSSupport@tufts.edu

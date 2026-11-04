@@ -1,6 +1,6 @@
 {% autoescape off %}Hello,
 
-The users on your project "{{ project.title }}" in ColdFront have changed. Access to the project's
+The users on your project "{{ project.title }}" in {{ site_name }} have changed. Access to the project's
 resources is being updated to match.
 
 To see who is on the project, visit: {{ url }}

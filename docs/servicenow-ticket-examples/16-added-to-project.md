@@ -5,9 +5,12 @@ When: someone is added to a project (`project_activate_user`). Sent as well as t
 
 One per person, project and day, filed already resolved. The person added is the contact person,
 so ServiceNow emails them; the PI is the caller, as on every project ticket; no one is watch-listed.
-Whoever added them isn't on the ticket; they only decide the source (self-service when it's the PI or
-an Approver).
+Whoever added them isn't on the ticket. When it's the Owner or an Approver, the message names them
+(here "by Bea Jones") and the source is self-service. Staff aren't named, and the source is email; nor
+is anyone named when it isn't known who made the change, such as a sync outside a web request.
 Nothing is sent to people who are removed, to the PI, or to ticketing admins.
+
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
 
 ### Filed resolved
 
@@ -32,7 +35,7 @@ Nothing is sent to people who are removed, to the PI, or to ticketing admins.
 ```text
 Hello,
 
-You have been added to project "Smith Lab". Please reference the self-service guide below for storage access. NOTE: It may take 1-2 hrs for your Tufts credentials to propagate, before you can access the storage.
+You have been added to the project "Smith Lab" by Bea Jones. Please reference the self-service guide below for storage access. NOTE: It may take 1-2 hrs for your Tufts credentials to propagate, before you can access the storage.
 
 Tiered Storage Allocation Self-Service Access Guides
 Tier 1 HPC (https://rtguides.it.tufts.edu/storage/systems/10-tier1-hpc.html#access-methods)
@@ -40,6 +43,8 @@ Tier 1 RStore (https://rtguides.it.tufts.edu/storage/systems/20-tier1-rstore.htm
 Tier 2 Research (https://rtguides.it.tufts.edu/storage/systems/30-tier2.html#access-method-globus)
 
 Research Computing Resource Manager (RCRM): The RCRM is now available at https://rcrm.it.tufts.edu/, providing owners and approvers with self-service tools to manage user access, request research storage quota adjustment, and update billing information for tiered research storage charge-backs. Please see the Research Technology Guides RCRM for detailed instructions. https://rtguides.it.tufts.edu/storage/rcrm/index.html
+
+NOTE: Only RT can access and move data to/from Tier 3. 
 
 Interested in a quick demo? Go to the link below to schedule an RCRM consultation to learn how to make the most of these self-service features.
 https://outlook.office.com/book/RDMSSupport@tufts.edu

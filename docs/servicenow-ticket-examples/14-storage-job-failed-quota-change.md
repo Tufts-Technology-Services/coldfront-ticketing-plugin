@@ -6,6 +6,8 @@ As for a [failed new share](13-storage-job-failed-new-share.md), but a child of 
 [quota change request](10-quota-change-request.md)'s ticket, with the admin who approved the change
 as caller and contact person.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Opened
 
 Opened with no state, so ServiceNow starts it New in the group's queue.
@@ -27,24 +29,21 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 **Description (internal, not emailed)**
 
 ```text
-A storage job failed after approval in ColdFront. The customer hasn't been told.
+A storage job failed after approval in RCRM. The customer hasn't been told.
 
 Job:          Quota change
 State:        failed: quota below current usage
 Project:      Smith Lab
-PI:           Alex Smith (asmith02)
+Owner:        Alex Smith (asmith02)
 Resource:     Tier 1 RStore
 Path:         smb://rstore.it.tufts.edu/smithlab$
 Quota:        8 TB
 Approved by:  privera04
 Request:      INC0000001
 
-The storage plugin doesn't retry. Fix the cause, then run the job again: for a new share, set the
-allocation's status away from Active and back; for a quota change, edit the allocation's quota or
-approve a new change request. When the job succeeds, ColdFront resolves the request's ticket and
-this one.
+When the job succeeds, RCRM resolves the request's ticket and this one.
 
-In ColdFront: https://rcrm.it.tufts.edu/allocation/change-request/1/
+In RCRM: https://rcrm.it.tufts.edu/allocation/change-request/1/
 ```
 
 Nothing customer-visible: no one is emailed.

@@ -6,6 +6,8 @@ Only admins are on this ticket; the user isn't emailed. It is a child of the acc
 when there is one (as in this example, where the account was waiting for a UID). A repeat failure
 adds a work note instead of another ticket, and a later success resolves it.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Opened
 
 Opened with no state, so ServiceNow starts it New in the group's queue.
@@ -27,19 +29,14 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 **Description (internal, not emailed)**
 
 ```text
-Setting up an HPC account failed in ColdFront. The user hasn't been told.
+Setting up an HPC account failed in RCRM. The user hasn't been told.
 
 User:     Jordan Doe (jdoe01)
 Email:    jordan.doe@tufts.edu
 Reason:   Could not create home directory /cluster/home/jdoe01: permission denied
 Request:  INC0000001
 
-Account creation doesn't retry a failure. Fix the cause, then run it again, from a ColdFront shell:
-
-    from account_signup.tasks import provision_hpc_account
-    provision_hpc_account("jdoe01")
-
-When it succeeds, ColdFront welcomes the user and resolves this ticket.
+When setting it up succeeds, RCRM welcomes the user and resolves this ticket.
 ```
 
 Nothing customer-visible: no one is emailed.

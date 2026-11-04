@@ -6,6 +6,8 @@ The admins' ticket for the request; it waits New in the queue. When the change i
 resolves this same ticket with the [quota change made](11-quota-change-made-tier-1-hpc.md) message.
 In this example the Approver asked, so the PI is watch-listed.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Opened
 
 Opened with no state, so ServiceNow starts it New in the group's queue.
@@ -27,10 +29,10 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 **Description (internal, not emailed)**
 
 ```text
-Allocation change requested in ColdFront.
+Allocation change requested in RCRM.
 
 Project:      Smith Lab
-PI:           Alex Smith (asmith02)
+Owner:        Alex Smith (asmith02)
 Requested by: Bea Jones (bjones03)
 Resource:     Tier 1 HPC
 Path:         /cluster/tufts/smithlab
@@ -41,7 +43,7 @@ Requested changes:
 Reason for change:
 New imaging instrument doubles our data rate this year.
 
-Review in ColdFront: https://rcrm.it.tufts.edu/allocation/change-request/1/
+Review in RCRM: https://rcrm.it.tufts.edu/allocation/change-request/1/
 ```
 
 Nothing customer-visible: no one is emailed.

@@ -30,9 +30,9 @@ from dataclasses import dataclass
 
 from coldfront.core.utils.mail import build_link
 from django.conf import settings
-from django.template.loader import render_to_string
 from django.utils.text import capfirst, slugify
 
+from ticketing.text import render_ticket_text
 from ticketing.tickets import (
     DEFAULT_BUSINESS_SERVICE,
     U_ACTION_ACTIVATE,
@@ -210,7 +210,7 @@ def describe_new_allocation(allocation, requestor) -> RequestDescription:
     pi = allocation.project.pi
     details = [
         ("Project", allocation.project.title),
-        ("PI", person_label(pi)),
+        ("Owner", person_label(pi)),  # Tufts' name for the PI
         ("Requested by", person_label(requestor)),
         ("Resource", resource.name if resource else "(none)"),
         *((a["name"], a["value"]) for a in _public_attributes(allocation)),
@@ -226,7 +226,7 @@ def describe_new_allocation(allocation, requestor) -> RequestDescription:
     }
     return RequestDescription(
         short_description=clean_short_description(f"{resource_label(allocation, resource)}: {summary}"),
-        description=render_to_string("ticketing/allocation_request.txt", context),
+        description=render_ticket_text("ticketing/allocation_request.txt", context),
         business_service=_business_service(resource),
         u_action=U_ACTION_ACTIVATE,
     )
@@ -281,7 +281,7 @@ def describe_request(change, requestor) -> RequestDescription:
     }
     return RequestDescription(
         short_description=clean_short_description(f"{resource_label(allocation, resource)}: {summary}"),
-        description=render_to_string("ticketing/allocation_change_request.txt", context),
+        description=render_ticket_text("ticketing/allocation_change_request.txt", context),
         business_service=_business_service(resource),
         u_action=U_ACTION_MOVE_ADD_CHANGE,
     )
@@ -317,7 +317,7 @@ def _render(folder, resource, context) -> str:
     alias = getattr(settings, "TICKETING_RESOURCE_TEMPLATE_ALIASES", {}).get(resource.name)
     names = [resource.name, alias, resource.resource_type.name]
     slugs = [*dict.fromkeys(slugify(name) for name in names if name), "generic"]
-    return render_to_string([f"ticketing/{folder}/{slug}.txt" for slug in slugs], context)
+    return render_ticket_text([f"ticketing/{folder}/{slug}.txt" for slug in slugs], context)
 
 
 def allocation_group(allocation) -> str | None:

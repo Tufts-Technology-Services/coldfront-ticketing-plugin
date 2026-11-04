@@ -2,8 +2,6 @@
 
 import logging
 
-from django.template.loader import render_to_string
-
 from ticketing import client as servicenow
 from ticketing.allocation_updates import (
     BUSINESS_SERVICE_BY_RESOURCE_TYPE,
@@ -25,6 +23,7 @@ from ticketing.tasks.filing import (
 from ticketing.tasks.people import (
     request_approver,
 )
+from ticketing.text import render_ticket_text
 from ticketing.tickets import (
     CONTACT_TYPE_MONITORING,
     DONE_STATES,
@@ -99,7 +98,7 @@ def file_storage_failure_ticket(
         caller_id=person,
         contact_type=CONTACT_TYPE_MONITORING,
         short_description=clean_short_description(f"{label}: Storage Job Failed | {allocation.project.title}"),
-        description=render_to_string("ticketing/storage_failure.txt", context),
+        description=render_ticket_text("ticketing/storage_failure.txt", context),
         u_business_service=BUSINESS_SERVICE_BY_RESOURCE_TYPE["Storage"],
         u_action=U_ACTION_MOVE_ADD_CHANGE if request.is_change else U_ACTION_ACTIVATE,
         parent=parent.number if parent else None,

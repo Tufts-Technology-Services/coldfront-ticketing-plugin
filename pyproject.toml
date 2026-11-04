@@ -48,7 +48,7 @@ packages = ["ticketing"]
 [tool.ruff]
 line-length = 120
 indent-width = 4
-target-version = "py312"
+target-version = "py310"  # requires-python
 
 [tool.ruff.lint]
 select = [

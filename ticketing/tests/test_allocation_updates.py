@@ -3,7 +3,6 @@ import datetime
 import pytest
 from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
-from django.urls import reverse
 
 from ticketing import client as servicenow
 from ticketing import tasks
@@ -18,8 +17,13 @@ from ticketing.allocation_updates import (
 )
 from ticketing.client import IncidentRef, UnknownReference
 from ticketing.tasks import people
+from ticketing.tests.rendering import capture_templates
 
 pytestmark = pytest.mark.django_db
+
+
+def partial_template(name):
+    return f"ticketing/partials/{name}.txt"
 
 
 def make_storage_allocation(
@@ -105,30 +109,31 @@ def use_client(monkeypatch):
 
 def test_storage_quota_change_message(pi):
     change = make_storage_change(pi)
-    update = describe_change(change)
+    with capture_templates() as rendered:
+        update = describe_change(change)
 
     assert update.short_description == "Research Storage: Quota Change | 20 TB | /cluster/tufts/lab"
-    title = change.allocation.project.title
-    assert (
-        f'The Research Storage storage allocation for project "{title}" (/cluster/tufts/lab) has been adjusted '
-        "from 10 TB to 20 TB."
-    ) in update.comments
-    assert "https://rcrm.it.tufts.edu/" in update.comments  # partials/rcrm.txt
-    assert "research-data-storage-faq" in update.comments  # partials/charge_back.txt
-    assert "Please email TTS-Research@tufts.edu for additional support." in update.comments
-    assert "July 1, 2026" not in update.comments  # the old dated reminder is gone
-    assert "Research Technology (RT)" in update.comments  # footer included
+    assert rendered.main == "ticketing/allocation_update/storage.txt"
+    assert {partial_template("rcrm"), partial_template("charge_back"), partial_template("footer")} <= set(
+        rendered.names
+    )
+    context = rendered.context("ticketing/allocation_update/storage.txt")
+    assert (context["old_quota"], context["new_quota"]) == ("10 TB", "20 TB")
+    assert context["path"] == "/cluster/tufts/lab"
+    for value in ("10 TB", "20 TB", change.allocation.project.title, change.allocation.get_absolute_url()):
+        assert value in update.comments
     assert update.business_service == "Research Data Storage"
 
 
-def test_an_rstore_quota_change_names_its_smb_path(pi):
+def test_an_rstore_quota_change_is_given_its_smb_and_windows_paths(pi):
     change = make_storage_change(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
     add_windows_path(change.allocation, RSTORE_WINDOWS_PATH)
-    update = describe_change(change)
+    with capture_templates() as rendered:
+        update = describe_change(change)
 
     assert update.short_description == f"Tier 1 RStore: Quota Change | 20 TB | {RSTORE_SMB_PATH}"
-    assert f'" ({RSTORE_SMB_PATH}) has been adjusted from 10 TB to 20 TB.' in update.comments
-    assert RSTORE_WINDOWS_PATH not in update.comments
+    context = rendered.context("ticketing/allocation_update/storage.txt")
+    assert (context["path"], context["windows_path"]) == (RSTORE_SMB_PATH, RSTORE_WINDOWS_PATH)
 
 
 def test_a_quota_change_with_neither_path_ends_with_the_project(pi):
@@ -168,11 +173,12 @@ def test_a_storage_change_without_a_quota_change_gets_the_generic_message(pi):
     change.end_date_extension = 90
     change.save()
 
-    update = describe_change(change)
+    with capture_templates() as rendered:
+        update = describe_change(change)
 
     assert update.short_description == f"Research Storage: Allocation Change | {change.allocation.project.title}"
-    assert "- End date extended by 90 days, to " in update.comments
-    assert "quota" not in update.comments.lower()  # not storage.txt's wording
+    assert rendered.main == "ticketing/allocation_change/generic.txt"  # not allocation_update/storage.txt
+    assert rendered.main_context["change"].end_date_extension == 90
     assert update.business_service == "Research Data Storage"
     assert update.close_notes == "Allocation change applied."
 
@@ -183,9 +189,11 @@ def test_other_resource_types_get_the_generic_change_message(pi):
     resource.resource_type = f.ResourceTypeFactory(name="Cluster")
     resource.save()
 
-    update = describe_change(change)
+    with capture_templates() as rendered:
+        update = describe_change(change)
 
-    assert "have been applied:\n- Storage Quota (TB): 10 -> 20\n" in update.comments
+    assert rendered.main == "ticketing/allocation_change/generic.txt"
+    assert rendered.main_context["attribute_changes"] == [{"name": "Storage Quota (TB)", "old": "10", "new": "20"}]
     assert update.business_service == "High Performance Computing (HPC)"
 
 
@@ -209,9 +217,12 @@ def cluster_change(pi, *private):
 
 
 def test_the_generic_change_message_leaves_out_private_attributes(pi):
-    comments = describe_change(cluster_change(pi, "internal_quota")).comments
+    with capture_templates() as rendered:
+        comments = describe_change(cluster_change(pi, "internal_quota")).comments
 
-    assert "- Core Usage (Hours): 1000 -> 2000\n" in comments
+    assert rendered.context("ticketing/allocation_change/generic.txt")["attribute_changes"] == [
+        {"name": "Core Usage (Hours)", "old": "1000", "new": "2000"}
+    ]
     assert "internal_quota" not in comments and "secret" not in comments and "hidden" not in comments
 
 
@@ -221,10 +232,11 @@ def test_a_change_to_only_private_attributes_lists_nothing(pi):
         allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
     ).delete()
 
-    comments = describe_change(change).comments
+    with capture_templates() as rendered:
+        comments = describe_change(change).comments
 
-    assert f"for project {change.allocation.project.title} have been applied.\n" in comments
-    assert "internal_quota" not in comments and "- " not in comments
+    assert rendered.context("ticketing/allocation_change/generic.txt")["attribute_changes"] == []
+    assert "internal_quota" not in comments and "secret" not in comments and "hidden" not in comments
 
 
 def test_an_allocation_with_no_resource_is_unsupported(pi):
@@ -331,7 +343,7 @@ def test_resolves_the_open_incident_for_the_change(pi, use_client):
     assert fields["close_code"] == "Solved Remotely (Permanently)"
     assert fields["close_notes"] == "Quota updated."
     assert fields["assigned_to"] == "svc_test"  # no one had picked it up
-    assert "to 20 TB" in fields["comments"]
+    assert "20 TB" in fields["comments"]
     assert client.created == []
 
 
@@ -544,7 +556,8 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
     quota.save()
     snow = use_client(FakeServiceNow())
 
-    incident = tasks.create_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
+    with capture_templates() as rendered:
+        incident = tasks.create_allocation_change_ticket(change.pk, requestor_pk=requestor.pk)
 
     _, ticket = snow.incidents[f"coldfront:allocation-change:{change.pk}"]
     assert incident.number == "INC0000001"
@@ -555,11 +568,12 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
     assert ticket["watch_list"] == ["asmith02"]
     assert ticket["u_business_service"] == "Research Data Storage"
     assert ticket["u_action"] == "Move/Add/Change"
+    context = rendered.context("ticketing/allocation_change_request.txt")
+    assert context["attribute_changes"] == [{"name": "Storage Quota (TB)", "current": "10", "requested": "20"}]
+    assert (context["pi"].username, context["requestor"].username) == ("asmith02", "jdoe01")
     description = ticket["description"]
-    assert "- Storage Quota (TB): 10 -> 20" in description
-    assert "Requested by: jdoe01 (jdoe01)" in description
     assert change.justification in description
-    assert f"Review in ColdFront: {reverse('allocation-change-detail', kwargs={'pk': change.pk})}" in description
+    assert change.get_absolute_url() in description
 
 
 def test_request_rerun_returns_the_existing_incident(pi, use_client):
@@ -578,14 +592,16 @@ def test_unsupported_change_still_gets_a_request_ticket(pi, use_client):
     change.save()
     snow = use_client(FakeServiceNow())
 
-    tasks.create_allocation_change_ticket(change.pk)
+    with capture_templates() as rendered:
+        tasks.create_allocation_change_ticket(change.pk)
 
     [(_, ticket)] = snow.incidents.values()
     assert (
         ticket["short_description"]
         == f"Research Storage: Allocation Change Request | {change.allocation.project.title}"
     )
-    assert "- End date extension: 90 days" in ticket["description"]
+    context = rendered.context("ticketing/allocation_change_request.txt")
+    assert (context["attribute_changes"], context["change"].end_date_extension) == ([], 90)
 
 
 def test_request_then_approval_resolves_the_same_incident(pi, requestor, use_client):
@@ -600,7 +616,7 @@ def test_request_then_approval_resolves_the_same_incident(pi, requestor, use_cli
     [(incident, fields)] = snow.incidents.values()
     assert incident.state == "6"
     assert fields["close_code"] == "Solved Remotely (Permanently)"
-    assert "has been adjusted from 10 TB to 20 TB." in fields["comments"]
+    assert "10 TB" in fields["comments"] and "20 TB" in fields["comments"]
     assert "Quota Change Request" in fields["short_description"]  # the request's, not overwritten
 
 
@@ -611,7 +627,8 @@ def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requesto
     allocation, _ = make_storage_allocation(pi)
     snow = use_client(FakeServiceNow())
 
-    incident = tasks.create_allocation_ticket(allocation.pk, requestor_pk=requestor.pk)
+    with capture_templates() as rendered:
+        incident = tasks.create_allocation_ticket(allocation.pk, requestor_pk=requestor.pk)
 
     _, ticket = snow.incidents[f"coldfront:allocation:{allocation.pk}"]
     assert incident.number == "INC0000001"
@@ -624,19 +641,18 @@ def test_new_allocation_request_opens_an_active_incident_for_admins(pi, requesto
     assert ticket["watch_list"] == ["asmith02"]
     assert ticket["u_action"] == "Activate/Setup/Install"
     assert ticket["u_business_service"] == "Research Data Storage"
+    assert rendered.context("ticketing/allocation_request.txt")["details"] == [
+        f"Project:            {allocation.project.title}",
+        "Owner:              asmith02 (asmith02)",
+        "Requested by:       jdoe01 (jdoe01)",
+        "Resource:           Research Storage",
+        "Storage Path:       /cluster/tufts/lab",
+        "Storage Quota (TB): 10",
+    ]
     description = ticket["description"]
-    assert (
-        f"Project:            {allocation.project.title}\n"
-        "PI:                 asmith02 (asmith02)\n"
-        "Requested by:       jdoe01 (jdoe01)\n"
-        "Resource:           Research Storage\n"
-        "Storage Path:       /cluster/tufts/lab\n"
-        "Storage Quota (TB): 10\n"
-        "\nReason for request:\n"
-    ) in description
     assert "Quantity" not in description
     assert allocation.justification in description
-    assert f"Review in ColdFront: {reverse('allocation-detail', kwargs={'pk': allocation.pk})}" in description
+    assert allocation.get_absolute_url() in description
 
 
 def test_every_new_allocation_gets_a_request_ticket(pi, use_client):
@@ -659,28 +675,35 @@ def test_the_new_allocation_request_description_leaves_out_private_attributes(pi
             value=value,
         )
 
-    description = describe_new_allocation(allocation, requestor).description
+    with capture_templates() as rendered:
+        description = describe_new_allocation(allocation, requestor).description
 
-    assert "\nSlurm account name: smith_lab\n" in description
+    assert "Slurm account name: smith_lab" in rendered.context("ticketing/allocation_request.txt")["details"]
     assert "internal_note" not in description and "hidden" not in description
 
 
 def test_the_change_request_description_leaves_out_private_attributes(pi, requestor):
-    description = describe_request(cluster_change(pi, "internal_quota"), requestor).description
+    with capture_templates() as rendered:
+        description = describe_request(cluster_change(pi, "internal_quota"), requestor).description
 
-    assert "- Core Usage (Hours): 2000 -> 2000" in description  # values as stored; approval already applied
+    # values as stored; approval already applied
+    assert rendered.context("ticketing/allocation_change_request.txt")["attribute_changes"] == [
+        {"name": "Core Usage (Hours)", "current": "2000", "requested": "2000"}
+    ]
     assert "internal_quota" not in description and "secret" not in description
 
 
-def test_a_change_request_of_only_private_attributes_says_why_none_are_shown(pi, requestor):
+def test_a_change_request_of_only_private_attributes_lists_none(pi, requestor):
     change = cluster_change(pi, "internal_quota")
     change.allocationattributechangerequest_set.filter(
         allocation_attribute__allocation_attribute_type__name="Core Usage (Hours)"
     ).delete()
 
-    description = describe_request(change, requestor).description
+    with capture_templates() as rendered:
+        description = describe_request(change, requestor).description
 
-    assert "- (none shown here; private attributes are left out, see ColdFront)" in description
+    assert rendered.context("ticketing/allocation_change_request.txt")["attribute_changes"] == []
+    assert "internal_quota" not in description and "secret" not in description
 
 
 def test_a_private_quota_still_names_the_quota_in_the_short_description(pi, requestor):
@@ -709,7 +732,8 @@ def test_request_then_activation_resolves_the_same_incident(pi, requestor, use_c
     snow = use_client(FakeServiceNow())
 
     opened = tasks.create_allocation_ticket(allocation.pk, requestor_pk=requestor.pk)
-    resolved = tasks.resolve_allocation_ticket(allocation.pk)
+    with capture_templates() as rendered:
+        resolved = tasks.resolve_allocation_ticket(allocation.pk)
     tasks.resolve_allocation_ticket(allocation.pk)  # re-run: already resolved
 
     assert resolved == opened
@@ -717,12 +741,10 @@ def test_request_then_activation_resolves_the_same_incident(pi, requestor, use_c
     assert incident.state == "6"
     assert fields["close_code"] == "Solved Remotely (Permanently)"
     assert fields["close_notes"] == "Allocation activated."
+    assert rendered.main == "ticketing/allocation_new/storage.txt"
     comments = fields["comments"]
-    assert (
-        f'The Research Storage storage allocation for project "{allocation.project.title}" has been created.'
-        in comments
-    )
-    assert "Quota: 10 TB" in comments and "Path:  /cluster/tufts/lab" in comments
+    assert allocation.project.title in comments
+    assert "10 TB" in comments and "/cluster/tufts/lab" in comments
     assert fields["u_contact_person"] == "jdoe01"  # the request's people fields are kept
 
 
@@ -737,7 +759,6 @@ def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
     assert ticket["short_description"] == "Research Storage: New Allocation | 10 TB | " + allocation.project.title
     assert ticket["caller_id"] == "asmith02"  # no requestor: the PI
     assert ticket["u_action"] == "Activate/Setup/Install"
-    assert "Path:" not in ticket["comments"]
 
 
 RSTORE_SMB_PATH = "smb://rstore.it.tufts.edu/smith_lab$"
@@ -755,45 +776,46 @@ def add_windows_path(allocation, value):
 
 
 @pytest.mark.parametrize(
-    "resource_name, tier, guide",
+    "resource_name, template",
     [
-        ("Tier 1 HPC", "Tier 1 HPC", "10-tier1-hpc.html#access-methods"),
-        ("Tier 1 RStore", "Tier 1 RStore", "20-tier1-rstore.html#access-methods"),
-        ("Tier 2 Research", "Tier 2 Research", "30-tier2.html#access-method-globus"),
+        ("Tier 1 HPC", "tier-1-hpc"),
+        ("Tier 1 RStore", "tier-1-rstore"),
+        ("Tier 2 Research", "tier-2-research"),
     ],
 )
-def test_each_storage_tier_has_its_own_new_allocation_message(pi, resource_name, tier, guide):
+def test_each_storage_tier_has_its_own_new_allocation_message(pi, resource_name, template):
     allocation, _ = make_storage_allocation(pi, resource_name=resource_name)
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    title = allocation.project.title
-    assert f'The {tier} storage allocation for project "{title}" has been created.' in comments
-    assert "It may take 24 hrs for your Tufts credentials to propagate" in comments
-    assert "/cluster/tufts/lab" in comments and "Quota: 10 TB" in comments
-    assert f"https://rtguides.it.tufts.edu/storage/systems/{guide}" in comments
-    assert "https://rcrm.it.tufts.edu/" in comments and "research-data-storage-faq" in comments
-    assert "July 1, 2026" not in comments
-    assert "&amp;" not in comments and "{%" not in comments
+    assert rendered.main == f"ticketing/allocation_new/{template}.txt"
+    assert {partial_template("rcrm"), partial_template("charge_back"), partial_template("footer")} <= set(
+        rendered.names
+    )
+    assert allocation.project.title in comments
+    assert "/cluster/tufts/lab" in comments and "10 TB" in comments
 
 
 def test_a_staff_copy_of_a_tier_gets_the_tiers_message_through_an_alias(pi, settings):
     settings.TICKETING_RESOURCE_TEMPLATE_ALIASES = {"TTS Staff - Tier 1 HPC": "Tier 1 HPC"}
     allocation, _ = make_storage_allocation(pi, resource_name="TTS Staff - Tier 1 HPC")
 
-    assert "The Tier 1 HPC storage allocation for project" in describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        describe_activation(allocation)
+
+    assert rendered.main == "ticketing/allocation_new/tier-1-hpc.txt"
 
 
 def test_a_storage_resource_without_its_own_message_gets_the_storage_one(pi):
     allocation, _ = make_storage_allocation(pi, resource_name="Tier 3 Research", path=None)
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    assert (
-        f'The Tier 3 Research storage allocation for project "{allocation.project.title}" has been created.' in comments
-    )
-    assert "Quota: 10 TB" in comments and "Path:" not in comments
-    assert "rtguides.it.tufts.edu/storage/systems" not in comments  # no tier's guide
+    assert rendered.main == "ticketing/allocation_new/storage.txt"
+    assert rendered.main_context["path"] == ""
+    assert "Tier 3 Research" in comments and "10 TB" in comments
 
 
 def test_a_new_rstore_allocation_lists_its_smb_paths_for_mac_and_windows(pi):
@@ -802,18 +824,20 @@ def test_a_new_rstore_allocation_lists_its_smb_paths_for_mac_and_windows(pi):
 
     update = describe_activation(allocation)
 
-    assert f"Mac OS: {RSTORE_SMB_PATH}\nWindows OS: {RSTORE_WINDOWS_PATH}\n" in update.comments
-    assert "Path:" not in update.comments  # the SMB path is listed once, as the Mac one
-    assert "Quota: 10 TB" in update.comments
+    assert RSTORE_SMB_PATH in update.comments and RSTORE_WINDOWS_PATH in update.comments
+    assert update.comments.count(RSTORE_SMB_PATH) == 1  # listed once, as the Mac path
+    assert "10 TB" in update.comments
     assert update.short_description == f"Tier 1 RStore: New Allocation | 10 TB | {RSTORE_SMB_PATH}"
 
 
 def test_a_new_rstore_allocation_without_a_windows_path_lists_only_the_mac_one(pi):
     allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    assert f"Mac OS: {RSTORE_SMB_PATH}\n" in comments and "Windows OS:" not in comments
+    assert RSTORE_SMB_PATH in comments
+    assert rendered.context("ticketing/allocation_new/tier-1-rstore.txt")["windows_path"] == ""
 
 
 def add_group(allocation, value):
@@ -832,16 +856,15 @@ def test_course_storage_explains_the_class_folders_and_names_its_groups(pi):
     )
     add_group(allocation, "bio101")
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    assert f'The Tier 1 HPC class storage for "{allocation.project.title}" has been created.' in comments
-    assert "Path:  /cluster/tufts/bio101" in comments and "Quota: 10 TB" in comments
-    assert "an admin group (bio101admin), which only includes instructors and TAs" in comments
-    assert "a general class group (bio101), which includes everyone in the class" in comments
-    assert "their own folder and the shared folder (/cluster/tufts/bio101/shared)." in comments
-    assert "10-tier1-hpc.html#access-methods" in comments
-    assert "Charge-Back" not in comments  # course storage isn't paid for
-    assert "&amp;" not in comments and "&#x27;" not in comments and "{%" not in comments
+    assert rendered.main == "ticketing/allocation_new/course-tier-1-hpc.txt"
+    context = rendered.main_context
+    assert (context["group"], context["admin_group"]) == ("bio101", "bio101admin")
+    for value in (allocation.project.title, "/cluster/tufts/bio101", "10 TB", "bio101admin", "(bio101)"):
+        assert value in comments
+    assert partial_template("charge_back") not in rendered.names  # course storage isn't paid for
 
 
 def test_course_storage_takes_its_group_from_the_project_without_one_of_its_own(pi):
@@ -849,36 +872,45 @@ def test_course_storage_takes_its_group_from_the_project_without_one_of_its_own(
     group_type = f.ProjectAttributeTypeFactory(name="Group")
     f.ProjectAttributeFactory(project=allocation.project, proj_attr_type=group_type, value="chem202")
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        describe_activation(allocation)
 
-    assert "(chem202admin)" in comments and "(chem202)" in comments
+    context = rendered.context("ticketing/allocation_new/course-tier-1-hpc.txt")
+    assert (context["group"], context["admin_group"]) == ("chem202", "chem202admin")
 
 
-def test_course_storage_without_a_group_or_path_still_explains_the_folders(pi):
+def test_course_storage_without_a_group_or_path_still_gets_the_course_message(pi):
     allocation, _ = make_storage_allocation(pi, resource_name="Course - Tier 1 HPC", path=None)
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        describe_activation(allocation)
 
-    assert "There are two groups for the class: an admin group, which only includes" in comments
-    assert "their own folder and the shared folder." in comments
+    assert rendered.main == "ticketing/allocation_new/course-tier-1-hpc.txt"
+    context = rendered.main_context
+    assert (context["group"], context["admin_group"], context["path"]) == (None, None, "")
 
 
 def test_storage_nobody_pays_for_leaves_out_the_charge_back(pi):
     allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 HPC", requires_payment=False)
     change = make_storage_change(pi, requires_payment=False)
 
-    assert "Charge-Back" not in describe_activation(allocation).comments
-    assert "Charge-Back" not in describe_change(change).comments
-    assert "https://rcrm.it.tufts.edu/" in describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        describe_activation(allocation)
+        describe_change(change)
+
+    assert partial_template("charge_back") not in rendered.names
+    assert rendered.names.count(partial_template("rcrm")) == 2
 
 
 def test_a_new_rstore_allocation_without_paths_leaves_them_out(pi):
     allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=None)
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    assert "Mac OS:" not in comments and "Windows OS:" not in comments
-    assert "access-methods)\n\nResearch Computing Resource Manager" in comments  # no stray blank lines
+    context = rendered.context("ticketing/allocation_new/tier-1-rstore.txt")
+    assert (context["path"], context["windows_path"]) == ("", "")
+    assert "\n\n\n" not in comments  # no stray blank lines where they would have been
 
 
 # -- Staff requests are assigned to the admin who approved them --------------------------------
@@ -996,14 +1028,13 @@ def test_activation_of_a_non_storage_allocation_resolves_with_the_generic_messag
     snow = use_client(FakeServiceNow())
 
     tasks.create_allocation_ticket(allocation.pk)
-    tasks.resolve_allocation_ticket(allocation.pk)
+    with capture_templates() as rendered:
+        tasks.resolve_allocation_ticket(allocation.pk)
 
     [(incident, fields)] = snow.incidents.values()
     assert incident.state == "6"
-    assert (
-        f"Your new allocation of Research Cluster for project {allocation.project.title} is now active."
-        in fields["comments"]
-    )
+    assert rendered.main == "ticketing/allocation_new/generic.txt"
+    assert "Research Cluster" in fields["comments"] and allocation.project.title in fields["comments"]
     assert fields["close_notes"] == "Allocation activated."
 
 
@@ -1022,57 +1053,63 @@ def test_the_generic_activation_message_shows_the_end_date_and_public_attributes
             value=value,
         )
 
-    comments = describe_activation(allocation).comments
+    with capture_templates() as rendered:
+        comments = describe_activation(allocation).comments
 
-    assert "It runs until June 30, 2027." in comments
-    assert "Allocation details:\n- Core Usage (Hours): 5000\n- Slurm account name: smith_lab\n" in comments
+    assert rendered.context("ticketing/allocation_new/generic.txt")["attributes"] == [
+        {"name": "Core Usage (Hours)", "value": "5000"},
+        {"name": "Slurm account name", "value": "smith_lab"},
+    ]
+    assert rendered.main_context["allocation"].end_date == datetime.date(2027, 6, 30)
+    assert "5000" in comments and "smith_lab" in comments
     assert "internal_note" not in comments and "do not show" not in comments
 
 
-def test_the_generic_activation_message_without_attributes_has_no_details_section(pi):
-    comments = describe_activation(make_cluster_allocation(pi)).comments
+def test_the_generic_activation_message_without_attributes_has_none_to_list(pi):
+    with capture_templates() as rendered:
+        describe_activation(make_cluster_allocation(pi))
 
-    assert "Allocation details" not in comments
-    assert "is now active.\n" in comments
+    assert rendered.context("ticketing/allocation_new/generic.txt")["attributes"] == []
 
 
 # -- Customer messages link the allocation's page ------------------------------------------------
 
 
-def rcrm_link_line(allocation):
-    return f"View this allocation in RCRM: {reverse('allocation-detail', kwargs={'pk': allocation.pk})}"
+def storage_activation(pi, resource_name):
+    allocation, _ = make_storage_allocation(pi, resource_name=resource_name)
+    return allocation, describe_activation(allocation)
+
+
+def cluster_activation(pi):
+    allocation = make_cluster_allocation(pi)
+    return allocation, describe_activation(allocation)
+
+
+def storage_quota_change(pi):
+    change = make_storage_change(pi)
+    return change.allocation, describe_change(change)
+
+
+def cluster_attribute_change(pi):
+    change = cluster_change(pi)
+    return change.allocation, describe_change(change)
 
 
 @pytest.mark.parametrize(
-    "resource_name", ["Tier 1 HPC", "Course - Tier 1 HPC", "Tier 1 RStore", "Tier 2 Research", "Tier 3 Research"]
+    "describe",
+    [
+        *(
+            pytest.param(lambda pi, name=name: storage_activation(pi, name), id=f"new {name}")
+            for name in ["Tier 1 HPC", "Course - Tier 1 HPC", "Tier 1 RStore", "Tier 2 Research", "Tier 3 Research"]
+        ),
+        pytest.param(storage_quota_change, id="quota change"),
+        pytest.param(cluster_activation, id="new generic"),
+        pytest.param(cluster_attribute_change, id="generic change"),
+    ],
 )
-def test_a_new_storage_allocation_message_links_its_page_after_the_details(pi, resource_name):
-    allocation, _ = make_storage_allocation(pi, resource_name=resource_name)
+def test_a_customer_message_links_the_allocations_page(pi, describe):
+    with capture_templates() as rendered:
+        allocation, update = describe(pi)
 
-    comments = describe_activation(allocation).comments
-
-    assert f"Quota: 10 TB\n\n{rcrm_link_line(allocation)}\n\n" in comments
-
-
-def test_a_quota_change_message_links_the_allocations_page(pi):
-    change = make_storage_change(pi)
-
-    comments = describe_change(change).comments
-
-    assert f"from 10 TB to 20 TB.\n\n{rcrm_link_line(change.allocation)}\n\n" in comments
-
-
-def test_the_generic_new_allocation_message_links_its_page(pi):
-    allocation = make_cluster_allocation(pi)
-
-    comments = describe_activation(allocation).comments
-
-    assert f"\n{rcrm_link_line(allocation)}\n\nThank you," in comments
-
-
-def test_the_generic_change_message_links_the_allocations_page(pi):
-    change = cluster_change(pi)
-
-    comments = describe_change(change).comments
-
-    assert f"\n{rcrm_link_line(change.allocation)}\n\nThank you," in comments
+    assert partial_template("allocation_link") in rendered.names
+    assert allocation.get_absolute_url() in update.comments

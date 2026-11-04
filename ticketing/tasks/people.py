@@ -22,12 +22,14 @@ def contact_type_for(user, project) -> str:
     means an administrator acting on someone's behalf. Membership is tested directly because
     project.has_perm() is True for every superuser. See "Who is on a ticket" in docs/design.md.
     """
+    return CONTACT_TYPE_SELF_SERVICE if is_owner_or_approver(user, project) else CONTACT_TYPE_EMAIL
+
+
+def is_owner_or_approver(user, project) -> bool:
+    """Whether `user` is `project`'s PI (Tufts' Owner) or a Manager on it (Tufts' Approver)."""
     if project.pi_id == user.pk:
-        return CONTACT_TYPE_SELF_SERVICE
-    is_manager = project.projectuser_set.filter(
-        user=user, role__name="Manager", status__name__in=("Active", "New")
-    ).exists()
-    return CONTACT_TYPE_SELF_SERVICE if is_manager else CONTACT_TYPE_EMAIL
+        return True
+    return project.projectuser_set.filter(user=user, role__name="Manager", status__name__in=("Active", "New")).exists()
 
 
 def project_watchers(project, *people) -> list[str]:
