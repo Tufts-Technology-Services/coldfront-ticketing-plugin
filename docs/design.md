@@ -120,8 +120,8 @@ storage exists. Ideally the storage plugin would expose that rule itself.
 A failure (`share_creation_failed` or `quota_update_failed`) files a child of the request's incident
 (ServiceNow's `parent` field), with only the approving admin on it, as caller and contact person,
 so no customer is emailed or sees it. (It's the one allocation ticket whose caller isn't the PI.) Its
-text is internal: what failed, the reason the storage plugin gave, the project and resource, and how
-to run the job again. There's one per request: a repeat
+text is internal: what failed, the reason the storage plugin gave, and the project and resource,
+not how to fix it. There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
 the request resolves the failure ticket too.
 
@@ -142,7 +142,8 @@ notice. It's a separate incident, filed already resolved, with the added user as
 (ServiceNow emails the contact person, not the caller), the PI as caller as on every project ticket,
 and nobody watch-listed. Whoever added them
 decides `contact_type` but isn't on the ticket. Its message
-(`project_user_added_notification.txt`) says they've been added, points to the storage access guides
+(`project_user_added_notification.txt`) says they've been added, and by whom when that's the project's
+owner or an Approver, people the new member knows (staff, and an unknown requestor, aren't named). It points to the storage access guides
 and RCRM, and warns that access can take an hour or two to appear. One per user, project and day, so
 a re-run or a same-day re-add sends nothing more; each user's ticket is its own, so the tasks don't
 race as the project notice's would. It has no `parent`: it stands on its own, as the HPC account
@@ -173,7 +174,7 @@ off, the ticket's comment is the only welcome.
 it when setting an account up fails, with the reason and the exception (none when the user couldn't
 be added to the access group), and still raises. It files an admin-only ticket, a child of the
 account's own ticket if it had to wait for a UID, with the service account as caller, so the user
-isn't emailed; its text says how to run account creation again. There's one per account
+isn't emailed; its text says what failed and why, not how to fix it. There's one per account
 (`coldfront:hpc-account:<username>:failed`): a repeat failure adds a work note, reopening the ticket if
 it was resolved, and the success that welcomes the user resolves it too.
 
@@ -194,21 +195,13 @@ place and files nothing.
   the specifics with the requester anyway.
 - **Allocation renewals and account upgrade requests** have no receivers.
 
-### Not yet wired up
-
-- **Per-user group membership tickets** (`ticketing/tasks/groups.py`): a ticket for each user who
-  joins or leaves a project's group. These are separate from the project user notices above, which
-  are wired up and cover the same changes with one notice per project per day. The per-user tasks
-  were superseded by them and are unused; if per-user tickets come back, bursts of changes would be
-  better batched into one ticket.
-
 ## Who is on a ticket
 
 - **Who is emailed:** ServiceNow emails a customer-visible comment to the contact person and the
   watch list, **not the caller** (Tufts' "End User" incident notifications). So anyone who must
   hear is one of those.
 - **Contact person** (`u_contact_person`): the requestor, whoever submitted the request. On a
-  notice for one person (an added project member, a group change), that person.
+  notice for one person (an added project member), that person.
 - **Caller** (`caller_id`): the project's PI, on every ticket about an allocation or a project.
   Tufts calls this field the Affected Client. The exceptions are admin-only failure tickets, whose
   caller is the approving admin, and HPC account tickets, which have no project and have the user.
@@ -235,8 +228,13 @@ the link form), whose requests open no ticket, and who is left out of project no
 ## What tickets say
 
 - **Admin-facing request descriptions** (`allocation_request.txt`, `allocation_change_request.txt`)
-  summarise the request: project, PI, requester, resource, attributes and the justification, with a
-  link back to ColdFront.
+  summarise the request: project, owner (the PI), requester, resource, attributes and the
+  justification, with a link back to ColdFront.
+- **Roles are named as Tufts names them:** ticket text says "Owner" for ColdFront's PI and
+  "Approver" for its Manager role, never "PI" or "Manager".
+- **The site's name** in ticket text ("Review in RCRM: ...") is `TICKETING_SITE_NAME`, default
+  "ColdFront", given to every template as `site_name`. Site-specific prose that names the site on
+  purpose, like Tufts' RCRM paragraph (`partials/rcrm.txt`), is changed by overriding the template.
 - **Customer messages** are chosen by resource: the first of `<folder>/<resource name>.txt`,
   `<folder>/<alias>.txt`, `<folder>/<resource type>.txt` and `<folder>/generic.txt` that exists
   (names slugified). The alias is another resource's name, from `TICKETING_RESOURCE_TEMPLATE_ALIASES`,
@@ -255,7 +253,7 @@ the link form), whose requests open no ticket, and who is left out of project no
   allocation's path (`Storage Path`) and quota where it has them. On RStore, `Storage Path` holds
   the SMB URL (`smb://...`) and `Storage Path (Windows)` the Windows form; the RStore message lists
   them as the Mac OS and Windows OS paths, leaving out whichever the allocation doesn't have.
-- **Customer messages link the allocation's page** ("View this allocation in RCRM: ..."), new
+- **Customer messages link the allocation's page** ("View this allocation in <site name>: ..."), new
   allocations and completed changes alike, generic messages included (`partials/allocation_link.txt`).
   Links are built from ColdFront's `CENTER_BASE_URL`, so it has to be ColdFront's own address.
 - **Only attributes the customer can see** (whose type isn't marked private) are listed, in

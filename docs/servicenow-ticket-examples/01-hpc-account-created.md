@@ -5,6 +5,8 @@ When: an HPC account is set up for someone who signed up (`hpc_account_provision
 Usually the account is set up straight away, so there's no earlier ticket: this one is filed
 already resolved, and ServiceNow emails the user the welcome.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Filed resolved
 
 | Field | Value |

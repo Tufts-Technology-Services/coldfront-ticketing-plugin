@@ -10,6 +10,8 @@ the Approver is watch-listed.
 If an admin with ticketing rights submits a request, nothing opens yet; the ticket is filed resolved
 when the allocation is activated, assigned to whoever activated it.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Opened
 
 Opened with no state, so ServiceNow starts it New in the group's queue.
@@ -31,10 +33,10 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 **Description (internal, not emailed)**
 
 ```text
-New allocation requested in ColdFront.
+New allocation requested in RCRM.
 
 Project:            Smith Lab
-PI:                 Alex Smith (asmith02)
+Owner:              Alex Smith (asmith02)
 Requested by:       Alex Smith (asmith02)
 Resource:           Tier 1 HPC
 Storage Quota (TB): 10
@@ -42,7 +44,7 @@ Storage Quota (TB): 10
 Reason for request:
 Sequencing data for the 2026-27 NIH R01 project.
 
-Review in ColdFront: https://rcrm.it.tufts.edu/allocation/1/
+Review in RCRM: https://rcrm.it.tufts.edu/allocation/1/
 ```
 
 Nothing customer-visible: no one is emailed.

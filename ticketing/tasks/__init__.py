@@ -5,8 +5,6 @@
     resolve_hpc_account_ticket        hpc_account_provisioned              coldfront:hpc-account:<utln>
     file_hpc_account_failure_ticket   hpc_account_provisioning_failed      coldfront:hpc-account:<utln>:failed
     resolve_hpc_account_failure_...   hpc_account_provisioned, after one   coldfront:hpc-account:<utln>:failed
-    create_group_membership_ticket    a user is added to a group *         coldfront:group-add:<group>:<utln>:<date>
-    create_group_removal_ticket       a user leaves a group *              coldfront:group-remove:<group>:<utln>:<date>
     create_project_users_ticket       project_(activate|remove)_user       coldfront:project-users:<pk>:<date>
     create_project_user_added_ticket  project_activate_user                coldfront:project-user-added:<pk>:<utln>:<date>
     create_allocation_ticket          allocation_new                       coldfront:allocation:<pk>
@@ -16,8 +14,7 @@
     file_storage_failure_ticket       share_creation_failed, quota_...     <request's>:storage-failed
     resolve_storage_failure_ticket    either success, after a failure      <request's>:storage-failed
 
-    * not triggered yet (see "Not yet wired up" in docs/design.md); the rest are wired up in
-      ticketing.signals.
+    All are queued by the receivers in ticketing.signals.
 
 Each task is defined in the module for its kind of ticket, and re-exported here: the signals queue
 them by these names ("ticketing.tasks.create_allocation_ticket"), so the names stay put.
@@ -26,7 +23,6 @@ them by these names ("ticketing.tasks.create_allocation_ticket"), so the names s
     storage_failures   storage-failure child tickets
     project_users      the daily project user notice, and the added user's own
     hpc_accounts       HPC account tickets
-    groups             group membership tickets (unused)
     filing             what they're built on: open_ticket, resolve_or_file, record_filed
     people             who is on a ticket, and who approved a request
 
@@ -55,7 +51,6 @@ from ticketing.tasks.allocations import (
     resolve_allocation_change_ticket,
     resolve_allocation_ticket,
 )
-from ticketing.tasks.groups import create_group_membership_ticket, create_group_removal_ticket
 from ticketing.tasks.hpc_accounts import (
     create_hpc_account_ticket,
     file_hpc_account_failure_ticket,
@@ -68,8 +63,6 @@ from ticketing.tasks.storage_failures import file_storage_failure_ticket, resolv
 __all__ = [
     "create_allocation_change_ticket",
     "create_allocation_ticket",
-    "create_group_membership_ticket",
-    "create_group_removal_ticket",
     "create_hpc_account_ticket",
     "file_hpc_account_failure_ticket",
     "create_project_user_added_ticket",

@@ -1,6 +1,6 @@
 {% autoescape off %}Hello,
 
-The {{ resource.name }} storage allocation for project "{{ project.title }}"{% if path %} ({{ path }}){% endif %} has been adjusted{% if old_quota %} from {{ old_quota }}{% endif %} to {{ new_quota }}.
+The {{ resource.name }} storage allocation for project "{{ project.title }}" has been adjusted{% if old_quota %} from {{ old_quota }}{% endif %} to {{ new_quota }}.
 
 {% include "ticketing/partials/allocation_link.txt" %}
 

@@ -9,7 +9,6 @@ hpc_account_provisioned one, and file_hpc_account_failure_ticket by hpc_account_
 import logging
 
 from django.contrib.auth import get_user_model
-from django.template.loader import render_to_string
 
 from ticketing import client as servicenow
 from ticketing.allocation_updates import (
@@ -31,6 +30,7 @@ from ticketing.tasks.filing import (
     resolution_fields,
     resolve_or_file,
 )
+from ticketing.text import render_ticket_text
 from ticketing.tickets import (
     CONTACT_TYPE_MONITORING,
     CONTACT_TYPE_SELF_SERVICE,
@@ -66,7 +66,7 @@ def create_hpc_account_ticket(username: str) -> IncidentRef:
     "coldfront:hpc-account:<utln>" once the account exists. Safe to re-run.
     """
     user = get_user_model().objects.get(username=username)
-    message = render_to_string("ticketing/hpc_account_request.txt", {"user": user})
+    message = render_ticket_text("ticketing/hpc_account_request.txt", {"user": user})
     return open_ticket(
         hpc_account_slot(user),
         people=lambda: _hpc_account_people(user),
@@ -95,7 +95,7 @@ def resolve_hpc_account_ticket(username: str, home_path: str) -> IncidentRef:
         people=lambda: _hpc_account_people(user),
         describe=lambda: AllocationUpdate(
             short_description=f"HPC Account Creation | {home_path}",
-            comments=render_to_string("ticketing/hpc_account_creation_notification.txt", {"user": user}),
+            comments=render_ticket_text("ticketing/hpc_account_creation_notification.txt", {"user": user}),
             close_notes="Cluster account created!",
             business_service=DEFAULT_BUSINESS_SERVICE,
             u_action=U_ACTION_ACTIVATE,
@@ -142,7 +142,7 @@ def file_hpc_account_failure_ticket(username: str, reason: str = "") -> Incident
         caller_id=person,
         contact_type=CONTACT_TYPE_MONITORING,
         short_description=clean_short_description(f"HPC Account Setup Failed | {username}"),
-        description=render_to_string(
+        description=render_ticket_text(
             "ticketing/hpc_account_failure.txt", {"user": user, "reason": reason, "parent": parent}
         ),
         u_business_service=DEFAULT_BUSINESS_SERVICE,

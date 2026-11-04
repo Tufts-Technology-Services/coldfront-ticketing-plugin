@@ -5,6 +5,7 @@ from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
+from ticketing.tests.rendering import capture_templates
 from ticketing.tests.test_allocation_updates import (
     FakeServiceNow,
     NoSuchUser,
@@ -47,7 +48,8 @@ def test_a_failed_share_files_an_admin_only_child_of_the_request(pi, requestor, 
     allocation = activated(in_request, requestor, admin, pi)
     request = open_request_ticket(snow, f"coldfront:allocation:{allocation.pk}")
 
-    incident = tasks.file_storage_failure_ticket(allocation.pk, state="failed: missing information")
+    with capture_templates() as rendered:
+        incident = tasks.file_storage_failure_ticket(allocation.pk, state="failed: missing information")
 
     _, ticket = failure_of(snow, f"coldfront:allocation:{allocation.pk}")
     assert ticket["parent"] == request.number
@@ -59,9 +61,10 @@ def test_a_failed_share_files_an_admin_only_child_of_the_request(pi, requestor, 
     assert ticket["contact_type"] == "monitoring"
     assert ticket["u_action"] == "Activate/Setup/Install"  # as for the request: a new share
     assert ticket["short_description"].startswith("Research Storage: Storage Job Failed | ")
-    assert "State:        failed: missing information" in ticket["description"]
-    assert f"Request:      {request.number}" in ticket["description"]
-    assert "Share creation" in ticket["description"]
+    context = rendered.context("ticketing/storage_failure.txt")
+    expected = ("Share creation", "failed: missing information", request.number)
+    assert (context["job"], context["state"], context["parent"].number) == expected
+    assert all(value in ticket["description"] for value in expected)
     record = FiledTicket.objects.get(correlation_id=f"coldfront:allocation:{allocation.pk}:storage-failed")
     assert (record.kind, record.number, record.allocation) == (
         FiledTicket.Kind.STORAGE_FAILURE,
@@ -74,11 +77,12 @@ def test_a_failed_share_files_an_admin_only_child_of_the_request(pi, requestor, 
 def test_without_a_request_ticket_it_has_no_parent(pi, admin, in_request, snow):
     allocation = activated(in_request, admin, admin, pi)  # an admin's request, not linked
 
-    tasks.file_storage_failure_ticket(allocation.pk)
+    with capture_templates() as rendered:
+        tasks.file_storage_failure_ticket(allocation.pk)
 
     _, ticket = failure_of(snow, f"coldfront:allocation:{allocation.pk}")
     assert ticket["parent"] is None
-    assert "no ticket: submitted by a ticketing admin" in ticket["description"]
+    assert rendered.context("ticketing/storage_failure.txt")["parent"] is None
 
 
 def test_a_failed_quota_change_names_the_change_requests_approver(
@@ -89,13 +93,14 @@ def test_a_failed_quota_change_names_the_change_requests_approver(
     set_status(in_request, other, change, f.AllocationChangeStatusChoiceFactory(name="Approved"))
     request = open_request_ticket(snow, f"coldfront:allocation-change:{change.pk}")
 
-    tasks.file_storage_failure_ticket(change.allocation.pk, change.pk, state="failed")
+    with capture_templates() as rendered:
+        tasks.file_storage_failure_ticket(change.allocation.pk, change.pk, state="failed")
 
     _, ticket = failure_of(snow, f"coldfront:allocation-change:{change.pk}")
     assert ticket["parent"] == request.number
     assert ticket["caller_id"] == ticket["u_contact_person"] == "admin02"
     assert ticket["u_action"] == "Move/Add/Change"
-    assert "Quota change" in ticket["description"]
+    assert rendered.context("ticketing/storage_failure.txt")["job"] == "Quota change"
     assert FiledTicket.objects.get(kind=FiledTicket.Kind.STORAGE_FAILURE).allocation_change == change
 
 

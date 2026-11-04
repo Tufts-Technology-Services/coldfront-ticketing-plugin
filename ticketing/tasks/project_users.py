@@ -6,7 +6,6 @@ import logging
 from coldfront.core.project.models import Project
 from coldfront.core.utils.mail import build_link
 from django.contrib.auth import get_user_model
-from django.template.loader import render_to_string
 
 from ticketing.allocation_updates import (
     AllocationUpdate,
@@ -22,8 +21,10 @@ from ticketing.tasks.filing import (
     resolve_or_file,
 )
 from ticketing.tasks.people import (
+    is_owner_or_approver,
     people_fields,
 )
+from ticketing.text import render_ticket_text
 from ticketing.tickets import (
     U_ACTION_MOVE_ADD_CHANGE,
     clean_short_description,
@@ -56,7 +57,7 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
         people=lambda: people_fields(project, requestor_pk),
         describe=lambda: AllocationUpdate(
             short_description=clean_short_description(f"Project Users Changed | {project.title}"),
-            comments=render_to_string(
+            comments=render_ticket_text(
                 "ticketing/project_users_changed_notification.txt", {"project": project, "url": url}
             ),
             close_notes="Project users updated.",
@@ -89,12 +90,23 @@ def create_project_user_added_ticket(project_pk: int, user_pk: int, requestor_pk
         people=lambda: added_user_people(project, user, requestor_pk),
         describe=lambda: AllocationUpdate(
             short_description=clean_short_description(f"Added to Project | {project.title}"),
-            comments=render_to_string("ticketing/project_user_added_notification.txt", {"project": project}),
+            comments=render_ticket_text(
+                "ticketing/project_user_added_notification.txt",
+                {"project": project, "added_by": named_adder(project, requestor_pk)},
+            ),
             close_notes="User added to project.",
             business_service="Research Data Storage",
             u_action=U_ACTION_MOVE_ADD_CHANGE,
         ),
     )
+
+
+def named_adder(project, requestor_pk):
+    """Who the added user's message says added them: the requestor if they're the project's owner (PI)
+    or one of its Approvers, people the new member knows. None for staff acting for the project, and
+    when the requestor isn't known: the PI stands in elsewhere, but isn't claimed to have done it."""
+    requestor = get_user_model().objects.filter(pk=requestor_pk).first() if requestor_pk else None
+    return requestor if requestor and is_owner_or_approver(requestor, project) else None
 
 
 def added_user_people(project, user, requestor_pk):

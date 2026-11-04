@@ -1,6 +1,6 @@
 {% autoescape off %}Hello,
 
-You have been added to project "{{ project.title }}". Please reference the self-service guide below for storage access. NOTE: It may take 1-2 hrs for your Tufts credentials to propagate, before you can access the storage.
+You have been added to the project "{{ project.title }}"{% if added_by %} by {{ added_by.get_full_name|default:added_by.username }}{% endif %}. Please reference the self-service guide below for storage access. NOTE: It may take 1-2 hrs for your Tufts credentials to propagate, before you can access the storage.
 
 Tiered Storage Allocation Self-Service Access Guides
 Tier 1 HPC (https://rtguides.it.tufts.edu/storage/systems/10-tier1-hpc.html#access-methods)

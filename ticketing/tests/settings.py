@@ -24,6 +24,8 @@ DATABASES = {
 # Settings the plugin reads that coldfront itself does not define.
 TICKETING_ENABLE_SIGNALS = True
 TICKETING_ASSIGNED_TO = "svc_test"
+# Neither "ColdFront" nor a real site's name, so no test leans on the literal text.
+TICKETING_SITE_NAME = "Example Portal"
 
 # Keep tests fast and hermetic.
 DEBUG = False

@@ -1,1 +1,1 @@
-{% autoescape off %}View this allocation in RCRM: {{ allocation_url }}{% endautoescape %}
+{% autoescape off %}View this allocation in {{ site_name }}: {{ allocation_url }}{% endautoescape %}

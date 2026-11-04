@@ -7,6 +7,8 @@ At most one a day per project, filed already resolved: later changes that day se
 doesn't say who changed; it links to the project's page. Whoever made the change is the contact
 person, and the PI and other Approvers are watch-listed. Here an Approver made the change.
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Filed resolved
 
 | Field | Value |
@@ -31,7 +33,7 @@ person, and the PI and other Approvers are watch-listed. Here an Approver made t
 ```text
 Hello,
 
-The users on your project "Smith Lab" in ColdFront have changed. Access to the project's
+The users on your project "Smith Lab" in RCRM have changed. Access to the project's
 resources is being updated to match.
 
 To see who is on the project, visit: https://rcrm.it.tufts.edu/project/1/

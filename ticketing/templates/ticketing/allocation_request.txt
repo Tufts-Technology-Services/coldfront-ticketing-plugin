@@ -1,8 +1,8 @@
-{% autoescape off %}New allocation requested in ColdFront.
+{% autoescape off %}New allocation requested in {{ site_name }}.
 
 {% for row in details %}{{ row }}
 {% endfor %}
 Reason for request:
 {{ allocation.justification }}
 
-Review in ColdFront: {{ url }}{% endautoescape %}
+Review in {{ site_name }}: {{ url }}{% endautoescape %}

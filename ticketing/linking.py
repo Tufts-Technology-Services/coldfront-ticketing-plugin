@@ -32,6 +32,7 @@ from ticketing.client import IncidentRef
 from ticketing.models import FiledTicket
 from ticketing.slots import AllocationTicketSlot, TicketSlot, project_users_slot
 from ticketing.tasks.filing import default_assignment
+from ticketing.text import site_name
 from ticketing.tickets import DONE_STATES, STATE_CLOSED
 
 logger = logging.getLogger(__name__)
@@ -208,7 +209,7 @@ def unlink_ticket(filed: FiledTicket, unlinked_by) -> None:
                 incident.sys_id,
                 {
                     "correlation_id": "",
-                    "work_notes": f"Unlinked from ColdFront ({filed.correlation_id}) by {unlinked_by.username}.",
+                    "work_notes": f"Unlinked from {site_name()} ({filed.correlation_id}) by {unlinked_by.username}.",
                 },
             )
     filed.delete()

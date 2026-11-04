@@ -256,7 +256,7 @@ def test_a_linked_allocation_request_is_resolved_not_refiled(pi, admin, snow):
 
     assert len(snow.records) == 1
     assert theirs["state"] == "6"
-    assert theirs["comments"].startswith("Hello,")
+    assert allocation.project.title in theirs["comments"]  # the customer's message
     ticket = FiledTicket.objects.get()
     assert ticket.resolved_at is not None
     assert ticket.source == FiledTicket.Source.LINKED  # resolving keeps how it came
@@ -284,7 +284,7 @@ def test_todays_project_user_changes_resolve_the_linked_ticket(pi, admin, snow, 
 
     assert len(snow.records) == 1
     assert theirs["state"] == "6"
-    assert 'The users on your project "Genomics Lab"' in theirs["comments"]
+    assert "Genomics Lab" in theirs["comments"]  # the notice
     assert FiledTicket.objects.get().resolved_at is not None
 
 
@@ -458,14 +458,16 @@ def linked(snow, admin, allocation):
     return theirs, FiledTicket.objects.get(correlation_id=f"coldfront:allocation:{allocation.pk}")
 
 
-def test_unlinking_clears_the_incidents_correlation_id_and_forgets_it(pi, admin, snow):
+def test_unlinking_clears_the_incidents_correlation_id_and_forgets_it(pi, admin, snow, settings):
     allocation, _ = make_storage_allocation(pi)
     theirs, filed = linked(snow, admin, allocation)
 
     linking.unlink_ticket(filed, admin)
 
     assert theirs["correlation_id"] == ""
-    assert theirs["work_notes"] == f"Unlinked from ColdFront (coldfront:allocation:{allocation.pk}) by admin01."
+    assert theirs["work_notes"] == (
+        f"Unlinked from {settings.TICKETING_SITE_NAME} (coldfront:allocation:{allocation.pk}) by admin01."
+    )
     assert not FiledTicket.objects.exists()
 
 

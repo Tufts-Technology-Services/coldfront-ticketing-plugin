@@ -7,6 +7,8 @@ A ticket opens in the queue and the user is told there will be a wait. When the 
 ColdFront resolves that ticket with the same welcome as
 [HPC account created](01-hpc-account-created.md).
 
+<!-- Generated below this line by ticketing/tests/test_ticket_examples.py. To refresh: UPDATE_TICKET_EXAMPLES=1 uv run pytest ticketing/tests/test_ticket_examples.py -->
+
 ### Opened
 
 Opened with no state, so ServiceNow starts it New in the group's queue.
