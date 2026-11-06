@@ -1,12 +1,13 @@
 import datetime
 
 import pytest
-from coldfront.core.test_helpers import factories as f
 from django.contrib.messages import get_messages
 from django.template import Context, Template
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
 from django.utils import timezone
+
+from coldfront.core.test_helpers import factories as f
 
 from ticketing import client as servicenow
 from ticketing import linking, tasks

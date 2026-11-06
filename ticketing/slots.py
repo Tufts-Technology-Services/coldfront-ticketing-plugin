@@ -8,9 +8,10 @@ functions query nothing, so the signal receivers use them inside the user's requ
 
 from dataclasses import dataclass, field
 
+from django.utils import timezone
+
 from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
 from coldfront.core.utils.mail import build_link
-from django.utils import timezone
 
 from ticketing.client import INCIDENT_TABLE
 from ticketing.models import FiledTicket

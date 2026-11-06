@@ -4,8 +4,9 @@ coldfront's `common/base.html` and navbars reverse a lot of core URL names, so t
 are mounted alongside coldfront's real URLConf rather than on their own.
 """
 
-from coldfront.config.urls import urlpatterns as coldfront_urlpatterns
 from django.urls import include, path
+
+from coldfront.config.urls import urlpatterns as coldfront_urlpatterns
 
 urlpatterns = [
     *coldfront_urlpatterns,

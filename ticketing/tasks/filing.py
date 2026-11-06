@@ -14,8 +14,9 @@ tests replace it in one place.
 
 import logging
 
-from coldfront.core.utils.common import import_from_settings
 from django.utils import timezone
+
+from coldfront.core.utils.common import import_from_settings
 
 from ticketing import client as servicenow
 from ticketing.allocation_updates import (

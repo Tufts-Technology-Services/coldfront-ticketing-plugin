@@ -1,7 +1,8 @@
 import importlib
 
-from coldfront.core.utils.common import import_from_settings
 from django.apps import AppConfig
+
+from coldfront.core.utils.common import import_from_settings
 
 TICKETING_ENABLE_SIGNALS = import_from_settings("TICKETING_ENABLE_SIGNALS", False)
 

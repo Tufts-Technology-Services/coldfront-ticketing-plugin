@@ -3,9 +3,10 @@ users change, for the PI and Approvers, and one to each user added, telling them
 
 import logging
 
+from django.contrib.auth import get_user_model
+
 from coldfront.core.project.models import Project
 from coldfront.core.utils.mail import build_link
-from django.contrib.auth import get_user_model
 
 from ticketing.allocation_updates import (
     AllocationUpdate,

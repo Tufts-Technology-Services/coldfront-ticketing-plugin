@@ -22,9 +22,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from django.utils import timezone
+
 from coldfront.core.allocation.models import Allocation
 from coldfront.core.project.models import Project
-from django.utils import timezone
 
 from ticketing import client as servicenow
 from ticketing.allocation_updates import resource_label

@@ -1,8 +1,9 @@
 import datetime
 
 import pytest
-from coldfront.core.test_helpers import factories as f
 from django.contrib.auth import get_user_model
+
+from coldfront.core.test_helpers import factories as f
 
 from ticketing import client as servicenow
 from ticketing import tasks

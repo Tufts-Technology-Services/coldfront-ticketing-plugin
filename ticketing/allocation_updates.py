@@ -28,9 +28,10 @@ allocation with no resource has no message (UnsupportedUpdate).
 import re
 from dataclasses import dataclass
 
-from coldfront.core.utils.mail import build_link
 from django.conf import settings
 from django.utils.text import capfirst, slugify
+
+from coldfront.core.utils.mail import build_link
 
 from ticketing.text import render_ticket_text
 from ticketing.tickets import (
