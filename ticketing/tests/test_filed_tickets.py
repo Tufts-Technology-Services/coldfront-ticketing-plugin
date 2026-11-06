@@ -2,11 +2,12 @@ import datetime
 import logging
 
 import pytest
-from coldfront.core.test_helpers import factories as f
 from django.template import Context, Template
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
 from django.utils import timezone
+
+from coldfront.core.test_helpers import factories as f
 
 from ticketing import client as servicenow
 from ticketing import tasks

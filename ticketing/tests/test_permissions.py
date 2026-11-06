@@ -1,9 +1,10 @@
 import pytest
-from coldfront.core.allocation.signals import allocation_new
-from coldfront.core.allocation.views import AllocationCreateView
 from django.contrib.auth.models import AnonymousUser, Group, Permission
 from django.test import override_settings
 from django.urls import reverse
+
+from coldfront.core.allocation.signals import allocation_new
+from coldfront.core.allocation.views import AllocationCreateView
 
 from ticketing.permissions import is_ticketing_admin
 from ticketing.tests.test_allocation_updates import make_storage_allocation

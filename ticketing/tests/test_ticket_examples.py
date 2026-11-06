@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
 from coldfront.core.test_helpers import factories as f
 from coldfront.core.utils import mail
 

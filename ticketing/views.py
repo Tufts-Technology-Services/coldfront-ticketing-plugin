@@ -1,14 +1,15 @@
 import logging
 
 import requests
-from coldfront.core.allocation.models import Allocation
-from coldfront.core.project.models import Project
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
+
+from coldfront.core.allocation.models import Allocation
+from coldfront.core.project.models import Project
 
 from ticketing import toggle
 from ticketing.client import ServiceNowError

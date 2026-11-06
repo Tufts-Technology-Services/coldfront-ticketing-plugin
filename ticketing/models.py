@@ -6,13 +6,14 @@ this plugin resolved it, but not the incident's current state, which changes the
 
 from urllib.parse import urlencode
 
-from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
-from coldfront.core.project.models import Project
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import models
 from django.db.models import Q
 from model_utils.models import TimeStampedModel
+
+from coldfront.core.allocation.models import Allocation, AllocationChangeRequest
+from coldfront.core.project.models import Project
 
 
 class FiledTicketQuerySet(models.QuerySet):

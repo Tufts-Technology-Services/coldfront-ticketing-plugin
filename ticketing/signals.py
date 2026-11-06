@@ -42,6 +42,19 @@ out of scope (see "Out of scope" in docs/design.md).
 
 import logging
 
+from coldfront_utils.attribute.attribute import create_allocation_attribute_type
+from coldfront_utils.signals import (
+    hpc_account_provisioned,
+    hpc_account_provisioning_failed,
+    hpc_account_requested,
+    quota_update_failed,
+    quota_update_successful,
+    share_creation_failed,
+    share_creation_successful,
+)
+from django.contrib.auth import get_user_model
+from django.dispatch import receiver
+
 from coldfront.core.allocation.models import (
     Allocation,
     AllocationAttribute,
@@ -62,18 +75,6 @@ from coldfront.core.allocation.views import (
 )
 from coldfront.core.project.models import ProjectUser
 from coldfront.core.project.signals import project_activate_user, project_remove_user
-from coldfront_utils.attribute.attribute import create_allocation_attribute_type
-from coldfront_utils.signals import (
-    hpc_account_provisioned,
-    hpc_account_provisioning_failed,
-    hpc_account_requested,
-    quota_update_failed,
-    quota_update_successful,
-    share_creation_failed,
-    share_creation_successful,
-)
-from django.contrib.auth import get_user_model
-from django.dispatch import receiver
 
 from ticketing import toggle
 from ticketing.allocation_updates import QUOTA_ATTRIBUTE_NAME, storage_will_provision
