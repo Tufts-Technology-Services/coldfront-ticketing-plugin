@@ -170,6 +170,19 @@ template must include it, guarded so the template still renders where the plugin
 {% if ticketing_toggle %}{% include 'ticketing/navbar_toggle.html' %}{% endif %}
 ```
 
+Or keep the switch out of the menu bar: an item in the user menu, with a sign in the menu bar that
+shows only while ticketing is off (a small "off" button, which turns it back on) or can't work. The
+switch is rarely used, so this keeps the menu bar clear. Put the first include inside the user
+menu's dropdown and the second in the menu bar, in place of `navbar_toggle.html`:
+
+```django
+{% if ticketing_toggle %}{% include 'ticketing/user_menu_toggle.html' %}{% endif %}
+{% if ticketing_toggle %}{% include 'ticketing/navbar_off_indicator.html' %}{% endif %}
+```
+
+Both post a plain form, which the toggle view redirects back, so the page reloads showing the new
+state in both places.
+
 The switch relies on simple-history's `HistoryRequestMiddleware`, which is in ColdFront's default
 `MIDDLEWARE`. If it's missing, the control shows "Ticket switch unavailable" and refuses to switch.
 

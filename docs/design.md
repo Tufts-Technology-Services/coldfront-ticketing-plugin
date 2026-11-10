@@ -180,8 +180,9 @@ it was resolved, and the success that welcomes the user resolves it too.
 
 ### The admin switch
 
-Ticketing admins can switch ticketing off for their own actions, from the menu bar. It's kept in
-their session. Off means no ServiceNow calls for anything they do, resolves included.
+Ticketing admins can switch ticketing off for their own actions, from the menu bar or the user
+menu: a site picks either the one menu-bar control or a user-menu item paired with a menu-bar
+sign that shows only while ticketing is off. It's kept in their session. Off means no ServiceNow calls for anything they do, resolves included.
 
 Where the storage plugin resolves the request later, in its own task, the admin's request (and so
 their switch) is no longer visible. So an approval made with the switch off leaves a private
