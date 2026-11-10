@@ -1,0 +1,28 @@
+{% comment %}
+A ticketing admin's switch as an item in the user menu, for sites that keep it out of the navbar.
+Include it inside the user menu's dropdown, guarded on the context processor's variable:
+  {% if ticketing_toggle %}{% include 'ticketing/user_menu_toggle.html' %}{% endif %}
+Pair it with navbar_off_indicator.html in the navbar, which says when ticketing is off. The whole item
+is one button that flips the switch: a plain form post, which the toggle view redirects back, so the
+page reloads showing the new state here and in the navbar.
+{% endcomment %}
+{% if not ticketing_toggle.available %}
+<span id="navbar-user-ticketing" class="dropdown-item-text text-warning" title="simple_history's HistoryRequestMiddleware is not active, so the ticketing switch can't take effect">
+  <i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Ticket switch unavailable
+</span>
+{% else %}
+<form id="navbar-user-ticketing" method="post" action="{% url 'ticketing-toggle' %}">
+  {% csrf_token %}
+  {% if ticketing_toggle.off %}
+  <button type="submit" class="dropdown-item" title="Your actions are not filing ServiceNow tickets. Click to turn ticketing back on.">
+    <i class="fas fa-ticket-alt" aria-hidden="true"></i> Ticket filing <span class="badge bg-warning text-dark">off</span>
+    <span class="text-muted small">turn on</span>
+  </button>
+  {% else %}
+  <button type="submit" class="dropdown-item" title="Your actions file ServiceNow tickets. Click to stop filing them for the rest of this session.">
+    <i class="fas fa-ticket-alt" aria-hidden="true"></i> Ticket filing <span class="badge bg-success">on</span>
+    <span class="text-muted small">turn off</span>
+  </button>
+  {% endif %}
+</form>
+{% endif %}

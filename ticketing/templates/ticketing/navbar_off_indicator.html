@@ -1,0 +1,28 @@
+{% comment %}
+The navbar's sign that a ticketing admin has switched ticketing off, for a site that keeps the switch
+itself in the user menu (user_menu_toggle.html). It shows only when it matters: nothing while
+ticketing is on; while it's off, a small yellow "off" button with a slashed ticket, which turns
+ticketing back on; and the warning when the switch can't take effect. Include it guarded on the
+context processor's variable, in the navbar's list:
+  {% if ticketing_toggle %}{% include 'ticketing/navbar_off_indicator.html' %}{% endif %}
+A plain form post: the toggle view redirects it back, so the page reloads with both this and the
+menu item showing the new state.
+{% endcomment %}
+{% if not ticketing_toggle.available %}
+<li id="navbar-ticketing-off" class="nav-item">
+  <span class="nav-link text-warning" title="simple_history's HistoryRequestMiddleware is not active, so the ticketing switch can't take effect">
+    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Ticket switch unavailable
+  </span>
+</li>
+{% elif ticketing_toggle.off %}
+<li id="navbar-ticketing-off" class="nav-item d-flex align-items-center me-2">
+  <form method="post" action="{% url 'ticketing-toggle' %}" class="d-inline">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-sm btn-warning py-0"
+            title="Your actions are not filing ServiceNow tickets. Click to turn ticketing back on."
+            aria-label="Ticketing is off. Turn it back on.">
+      <span class="fa-stack" style="width: 1.4em; height: 1.2em; line-height: 1.2em;" aria-hidden="true"><i class="fas fa-ticket-alt fa-stack-1x"></i><i class="fas fa-slash fa-stack-1x"></i></span> off
+    </button>
+  </form>
+</li>
+{% endif %}
