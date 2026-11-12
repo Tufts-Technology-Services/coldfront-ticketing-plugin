@@ -162,18 +162,12 @@ through a group, in Django admin. Django's `is_staff` alone doesn't count. Ticke
 
 ### Admin ticketing switch
 
-Ticketing admins get a "Tickets on / Tickets off" control in the menu bar. With it off, nothing they do
-files or resolves a ticket, until they switch it back on or their session ends. The site's navbar
-template must include it, guarded so the template still renders where the plugin isn't installed:
-
-```django
-{% if ticketing_toggle %}{% include 'ticketing/navbar_toggle.html' %}{% endif %}
-```
-
-Or keep the switch out of the menu bar: an item in the user menu, with a sign in the menu bar that
-shows only while ticketing is off (a small "off" button, which turns it back on) or can't work. The
-switch is rarely used, so this keeps the menu bar clear. Put the first include inside the user
-menu's dropdown and the second in the menu bar, in place of `navbar_toggle.html`:
+Ticketing admins get a "Ticket filing on / off" item in the user menu. With it off, nothing they do
+files or resolves a ticket, until they switch it back on or their session ends. The switch is rarely
+used, so the menu bar shows something only while ticketing is off (a small yellow "off" button,
+which turns it back on) or when the switch can't work. The site's navbar template includes both,
+guarded so the template still renders where the plugin isn't installed: the first inside the user
+menu's dropdown, the second in the menu bar.
 
 ```django
 {% if ticketing_toggle %}{% include 'ticketing/user_menu_toggle.html' %}{% endif %}

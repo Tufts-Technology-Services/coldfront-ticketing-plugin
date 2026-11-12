@@ -2,6 +2,8 @@ import logging
 
 import pytest
 from django.contrib.sessions.backends.db import SessionStore
+from django.template import TemplateDoesNotExist
+from django.template.loader import get_template
 from django.test import RequestFactory
 from django.urls import reverse
 
@@ -85,39 +87,54 @@ def toggle_url():
     return reverse("ticketing-toggle")
 
 
-def htmx_post(client):
-    return client.post(toggle_url(), headers={"HX-Request": "true"})
+def post_to_toggle(client, **headers):
+    return client.post(toggle_url(), headers=headers)
 
 
-def test_toggle_flips_the_admins_switch_and_returns_the_control(admin, client):
+def test_toggle_flips_the_admins_switch_and_redirects_back(admin, client):
+    client.force_login(admin)
+    page = "http://testserver/allocation/"
+
+    response = post_to_toggle(client, Referer=page)
+    assert response.status_code == 302 and response.headers["Location"] == page
+    assert client.session[toggle.SESSION_KEY] is True
+
+    post_to_toggle(client, Referer=page)
+    assert client.session[toggle.SESSION_KEY] is False
+
+
+def test_toggle_redirects_htmx_posts_too(admin, client):
+    # The menu-bar control htmx swapped in is gone; the menu item and the navbar indicator both
+    # need the page to reload.
     client.force_login(admin)
 
-    response = htmx_post(client)
-    assert response.status_code == 200
-    assert client.session[toggle.SESSION_KEY] is True
-    assert "Tickets off" in response.content.decode()
+    response = post_to_toggle(client, **{"HX-Request": "true", "Referer": "http://testserver/allocation/"})
 
-    response = htmx_post(client)
-    assert client.session[toggle.SESSION_KEY] is False
-    assert "Tickets on" in response.content.decode()
+    assert response.status_code == 302 and response.headers["Location"] == "http://testserver/allocation/"
+    assert client.session[toggle.SESSION_KEY] is True
+
+
+def test_the_old_navbar_toggle_template_is_gone():
+    with pytest.raises(TemplateDoesNotExist):
+        get_template("ticketing/navbar_toggle.html")
 
 
 def test_ticketing_admins_can_use_the_toggle(ticketing_admin, client):
     client.force_login(ticketing_admin)
 
-    assert htmx_post(client).status_code == 200
+    assert post_to_toggle(client).status_code == 302
     assert client.session[toggle.SESSION_KEY] is True
 
 
 def test_toggle_is_ticketing_admins_only(requestor, client):
     client.force_login(requestor)
 
-    assert htmx_post(client).status_code == 403
+    assert post_to_toggle(client).status_code == 403
     assert toggle.SESSION_KEY not in client.session
 
 
 def test_toggle_sends_anonymous_users_to_log_in(client):
-    response = htmx_post(client)
+    response = post_to_toggle(client)
 
     assert response.status_code == 302
     assert "login" in response.headers["Location"]
@@ -129,13 +146,13 @@ def test_toggle_accepts_only_post(admin, client):
     assert client.get(toggle_url()).status_code == 405
 
 
-def test_toggle_without_htmx_redirects_back(admin, client):
+def test_toggle_redirects_home_when_the_referer_is_off_site(admin, client):
     client.force_login(admin)
 
-    response = client.post(toggle_url(), headers={"Referer": "http://testserver/allocation/"})
-    assert response.status_code == 302 and response.headers["Location"] == "http://testserver/allocation/"
+    response = post_to_toggle(client, Referer="https://elsewhere.example/")
+    assert response.headers["Location"] == reverse("home")
 
-    response = client.post(toggle_url(), headers={"Referer": "https://elsewhere.example/"})
+    response = post_to_toggle(client)
     assert response.headers["Location"] == reverse("home")
 
 
@@ -143,7 +160,7 @@ def test_history_middleware_is_active_on_real_requests(admin, client):
     # The runtime check the whole feature rests on, through ColdFront's actual middleware stack.
     client.force_login(admin)
 
-    assert htmx_post(client).context["ticketing_toggle"]["available"] is True
+    assert client.get(reverse("home")).context["ticketing_toggle"]["available"] is True
 
 
 def test_toggle_refuses_when_the_history_middleware_is_missing(admin, client, settings, caplog):
@@ -151,17 +168,17 @@ def test_toggle_refuses_when_the_history_middleware_is_missing(admin, client, se
     client.force_login(admin)
 
     with caplog.at_level(logging.ERROR, logger="ticketing.views"):
-        response = htmx_post(client)
+        response = post_to_toggle(client)
 
+    assert response.status_code == 302
     assert toggle.SESSION_KEY not in client.session
-    assert "Ticket switch unavailable" in response.content.decode()
     assert "HistoryRequestMiddleware is not active" in caplog.text
 
 
 @pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
 def test_context_processor_gives_ticketing_admins_their_switch(client, request, who):
     client.force_login(request.getfixturevalue(who))
-    htmx_post(client)
+    post_to_toggle(client)
 
     response = client.get(reverse("home"))
 

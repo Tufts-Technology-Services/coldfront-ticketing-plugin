@@ -4,7 +4,7 @@ import requests
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, redirect
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 
@@ -28,10 +28,10 @@ def same_site(request, url):
 
 
 class TicketingToggleView(LoginRequiredMixin, UserPassesTestMixin, View):
-    """Flip the acting ticketing admin's switch.
+    """Flip the acting ticketing admin's switch, then go back to the page the post came from.
 
-    htmx posts here and swaps in the re-rendered menu-bar control; a plain form post is redirected
-    back to the page it came from.
+    The user menu's item and the navbar's "off" indicator both show the switch, so the whole page
+    reloads rather than htmx swapping in a part of it.
     """
 
     def test_func(self):
@@ -47,8 +47,6 @@ class TicketingToggleView(LoginRequiredMixin, UserPassesTestMixin, View):
                 request.user.username,
             )
 
-        if request.headers.get("HX-Request") == "true":
-            return render(request, "ticketing/navbar_toggle.html", {"ticketing_toggle": toggle.state(request)})
         return redirect(same_site(request, request.headers.get("Referer")) or "home")
 
 
