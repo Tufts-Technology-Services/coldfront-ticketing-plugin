@@ -13,7 +13,7 @@ Every storage resource gets this message. Unpaid ones (TTS Staff, Course) leave 
 
 | Field | Value |
 |---|---|
-| Assigned to | svc_rcrm |
+| Assigned to | privera04 |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | Quota updated. |
@@ -28,8 +28,6 @@ The Tier 1 HPC storage allocation for project "Smith Lab" has been adjusted from
 View this allocation in RCRM: https://rcrm.it.tufts.edu/allocation/1/
 
 Research Computing Resource Manager (RCRM): The RCRM is now available at https://rcrm.it.tufts.edu/, providing owners and approvers with self-service tools to manage user access, request research storage quota adjustment, and update billing information for tiered research storage charge-backs. Please see the Research Technology Guides RCRM for detailed instructions. https://rtguides.it.tufts.edu/storage/rcrm/index.html
-
-NOTE: Only RT can access and move data to/from Tier 3. 
 
 Interested in a quick demo? Go to the link below to schedule an RCRM consultation to learn how to make the most of these self-service features.
 https://outlook.office.com/book/RDMSSupport@tufts.edu

@@ -20,7 +20,7 @@ already resolved, and ServiceNow emails the user the welcome.
 | Category | Research |
 | Subcategory | Research Systems |
 | Assignment group | TTS Research Technology |
-| Assigned to | svc_rcrm |
+| Assigned to | svc_rcrm (`TICKETING_ASSIGNED_TO`) |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | Cluster account created! |

@@ -13,6 +13,7 @@ from ticketing.models import FiledTicket
 from ticketing.tests.rendering import capture_templates
 from ticketing.tests.test_allocation_updates import (
     FakeServiceNow,
+    NoSuchUser,
     make_storage_allocation,
     make_storage_change,
     partial_template,
@@ -38,6 +39,9 @@ class FakeClient:
 
     def update_incident(self, sys_id, fields):
         self.updated.append((sys_id, fields))
+
+    def sys_id_for(self, table, column, value):
+        return f"<{table}.{column}={value}>"
 
 
 @pytest.fixture
@@ -198,7 +202,7 @@ def test_files_a_resolved_notice_for_the_project(project, requestor, fake_client
     assert ticket.short_description == "Project Users Changed | Genomics Lab"
     assert ticket.u_business_service == "Research Data Storage"
     assert ticket.u_action == "Move/Add/Change"
-    assert ticket.assigned_to == "svc_test"
+    assert ticket.assigned_to is None  # jdoe01 isn't an admin, and the service account never is
     assert ticket.state == "6" and ticket.close_code == "Solved Remotely (Permanently)"
     assert ticket.close_notes == "Project users updated."
     assert ticket.correlation_id == f"coldfront:project-users:{project.pk}:2026-09-28"
@@ -250,6 +254,49 @@ def test_a_change_on_a_later_day_files_a_new_notice(project, today, fake_client)
     ]
 
 
+@pytest.mark.parametrize("who", ["admin", "ticketing_admin"])
+@pytest.mark.parametrize("task", ["users_changed", "user_added"])
+def test_a_change_made_by_a_ticketing_admin_is_assigned_to_them(project, request, use_client, who, task):
+    changed_by = request.getfixturevalue(who)
+    snow = use_client(FakeServiceNow())
+
+    file_project_user_notice(task, project, changed_by.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["state"] == "6"
+    assert ticket["assigned_to"] == changed_by.username
+
+
+@pytest.mark.parametrize("task", ["users_changed", "user_added"])
+def test_a_ticketing_admin_servicenow_doesnt_know_leaves_it_unassigned(project, admin, use_client, caplog, task):
+    snow = use_client(NoSuchUser("admin01"))
+
+    file_project_user_notice(task, project, admin.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["assigned_to"] is None  # not the service account
+    assert "ServiceNow has no user admin01" in caplog.text
+
+
+@pytest.mark.parametrize("task", ["users_changed", "user_added"])
+def test_a_change_made_by_the_pi_is_left_unassigned(project, pi, use_client, task):
+    snow = use_client(FakeServiceNow())
+
+    file_project_user_notice(task, project, pi.pk)
+
+    [(_, ticket)] = snow.incidents.values()
+    assert ticket["assigned_to"] is None
+
+
+def file_project_user_notice(task, project, requestor_pk):
+    """File one of the two project user notices, as `requestor_pk` changing the project's users."""
+    if task == "users_changed":
+        return tasks.create_project_users_ticket(project.pk, requestor_pk=requestor_pk)
+    user = f.UserFactory(username="cnew04")
+    f.ProjectUserFactory(project=project, user=user, role=f.ProjectUserRoleChoiceFactory(name="User"))
+    return tasks.create_project_user_added_ticket(project.pk, user.pk, requestor_pk=requestor_pk)
+
+
 # -- A user added to a project ------------------------------------------------------------------
 
 
@@ -270,10 +317,10 @@ def test_tells_the_added_user_and_closes_the_ticket(project, added, requestor, f
     assert ticket.caller_id == "asmith02" and ticket.u_contact_person == "cnew04"
     assert ticket.watch_list is None  # the PI and Approvers get the project notice instead
     assert ticket.contact_type == "email"  # jdoe01 isn't the PI or an Approver here
-    assert ticket.short_description == "Added to Project | Genomics Lab"
+    assert ticket.short_description == "Added to Project | Genomics Lab | cnew04"
     assert ticket.u_business_service == "Research Data Storage"
     assert ticket.u_action == "Move/Add/Change"
-    assert ticket.assigned_to == "svc_test"
+    assert ticket.assigned_to is None  # jdoe01 isn't an admin, and the service account never is
     assert ticket.state == "6" and ticket.close_code == "Solved Remotely (Permanently)"
     assert ticket.close_notes == "User added to project."
     assert ticket.correlation_id == f"coldfront:project-user-added:{project.pk}:cnew04:2026-09-28"

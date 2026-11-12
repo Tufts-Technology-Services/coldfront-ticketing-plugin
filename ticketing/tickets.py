@@ -85,8 +85,8 @@ class ServiceNowIncident:
     subcategory: str = "Research Systems"
     u_business_service: str = DEFAULT_BUSINESS_SERVICE
     short_description: str
-    # Unset, the incident waits unassigned in assignment_group's queue. Required on a ticket filed
-    # already resolved (see __post_init__).
+    # Unset, the incident waits unassigned in assignment_group's queue. tasks.filing decides who, if
+    # anyone, a resolved ticket is assigned to.
     assigned_to: str | None = None
     assignment_group: str = "TTS Research Technology"
     parent: str | None = None
@@ -101,10 +101,6 @@ class ServiceNowIncident:
     correlation_id: str | None = None
     comments: str | None = None  # customer-visible journal entry
     work_notes: str | None = None  # internal journal entry
-
-    def __post_init__(self):
-        if self.state is not None and not self.assigned_to:
-            raise ValueError(f"A ticket filed with state {self.state!r} needs assigned_to")
 
 
 def clean_short_description(value: str) -> str:

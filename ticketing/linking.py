@@ -153,11 +153,11 @@ def link_ticket(number, target: LinkTarget, linked_by) -> Linked:
                 f"by hand, as a duplicate of {ours.number}."
             )
         # Clear its correlation_id first: if setting ours then fails, nothing shares one, and
-        # linking again just sets it. Closed, like resolved, means assigned (see tasks.filing.resolve_or_file).
+        # linking again just sets it. Unless someone picked it up, it's closed by the admin linking.
         client.update_incident(
             ours.sys_id,
             {
-                **default_assignment(ours),
+                **default_assignment(client, ours, linked_by.username, ours.number),
                 "correlation_id": "",
                 "u_duplicate_of": incident.sys_id,
                 "state": STATE_CLOSED,

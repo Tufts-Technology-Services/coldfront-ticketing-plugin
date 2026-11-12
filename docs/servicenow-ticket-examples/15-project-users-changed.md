@@ -23,7 +23,7 @@ person, and the PI and other Approvers are watch-listed. Here an Approver made t
 | Category | Research |
 | Subcategory | Research Systems |
 | Assignment group | TTS Research Technology |
-| Assigned to | svc_rcrm |
+| Assigned to | no one |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | Project users updated. |

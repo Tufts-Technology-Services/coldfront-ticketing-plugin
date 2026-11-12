@@ -63,6 +63,9 @@ class FakeServiceNow:
         )
         return self._incident(record)
 
+    def sys_id_for(self, table, column, value):
+        return f"<{table}.{column}={value}>"
+
     def update_incident(self, sys_id, fields):
         self.updates.append((sys_id, fields))
         next(r for r in self.records if r["sys_id"] == sys_id).update(fields)
@@ -168,7 +171,7 @@ def test_coldfronts_own_incident_is_closed_as_a_duplicate(pi, admin, snow):
     assert closed["u_duplicate_of"] == theirs["sys_id"]
     assert closed["close_notes"] == "Duplicate ticket"
     assert closed["correlation_id"] == ""
-    assert closed["assigned_to"] == "svc_test"  # it was unassigned
+    assert closed["assigned_to"] == "admin01"  # it was unassigned, so the admin who linked it
     [closing] = [fields for sys_id, fields in snow.updates if sys_id == ours.sys_id]
     assert "close_code" not in closing  # Tufts closes duplicates without one
     assert theirs["correlation_id"] == f"coldfront:allocation:{allocation.pk}"

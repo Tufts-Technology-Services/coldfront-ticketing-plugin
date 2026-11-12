@@ -3,7 +3,7 @@
 open_ticket opens an admin-facing incident for a request, or returns the one already filed; it
 leaves state and assigned_to unset so the incident waits New in the assignment group's queue.
 resolve_or_file posts a customer-facing message as a comment and resolves, assigning the incident
-to TICKETING_ASSIGNED_TO if no one has picked it up; with no incident to resolve it files one
+to the admin responsible if no one has picked it up; with no incident to resolve it files one
 already resolved. Each ticket filed, found or resolved is recorded as a FiledTicket (record_filed),
 for links from ColdFront's pages. File-only paths check that record before asking ServiceNow;
 resolving always asks ServiceNow, which has the incident's current state.
@@ -38,17 +38,18 @@ from ticketing.tickets import (
 logger = logging.getLogger(__name__)
 
 
-def known_user(client, utln, what) -> str:
-    """`utln` if ServiceNow has that user, else TICKETING_ASSIGNED_TO (logged if `utln` was given).
-    The lookup is cached, so building the payload doesn't repeat it."""
-    service_account = import_from_settings("TICKETING_ASSIGNED_TO")
+def known_user(client, utln, what, *, unassigned_ok=False) -> str | None:
+    """`utln` if ServiceNow has that user. Otherwise None if `unassigned_ok`, else TICKETING_ASSIGNED_TO;
+    logged if `utln` was given. The lookup is cached, so building the payload doesn't repeat it."""
+    fallback = None if unassigned_ok else import_from_settings("TICKETING_ASSIGNED_TO")
     if not utln:
-        return service_account
+        return fallback
     try:
         client.sys_id_for(*REFERENCE_FIELDS["assigned_to"], utln)
     except UnknownReference:
-        logger.warning("ServiceNow has no user %s; using %s for %s", utln, service_account, what)
-        return service_account
+        instead = f"using {fallback}" if fallback else "leaving it unassigned"
+        logger.warning("ServiceNow has no user %s; %s for %s", utln, instead, what)
+        return fallback
     return utln
 
 
@@ -58,10 +59,15 @@ def recorded_ref(correlation_id) -> IncidentRef | None:
     return IncidentRef(sys_id=filed.sys_id, number=filed.number) if filed else None
 
 
-def default_assignment(incident) -> dict:
-    """The update that gives a resolved `incident` an assignee: TICKETING_ASSIGNED_TO, unless someone
-    has picked it up already (then nothing)."""
-    return {} if incident.assigned_to else {"assigned_to": import_from_settings("TICKETING_ASSIGNED_TO")}
+def default_assignment(client, incident, utln, what, *, unassigned_ok=False) -> dict:
+    """The update that assigns `incident` as it's resolved or closed: nothing if someone has picked it
+    up already, else to `utln`, the admin responsible, as known_user finds them (the fallback when
+    there's none, or ServiceNow doesn't know them, is TICKETING_ASSIGNED_TO, or nobody if
+    `unassigned_ok`)."""
+    if incident.assigned_to:
+        return {}
+    assignee = known_user(client, utln, what, unassigned_ok=unassigned_ok)
+    return {"assigned_to": assignee} if assignee else {}
 
 
 def resolution_fields(close_notes, comments=None) -> dict:
@@ -128,18 +134,21 @@ def open_ticket(slot: TicketSlot, *, people, describe) -> IncidentRef:
     return incident
 
 
-def resolve_or_file(slot: TicketSlot, *, people, describe, assignee=None) -> IncidentRef | None:
+def resolve_or_file(
+    slot: TicketSlot, *, people, describe, assignee=None, default_assignee=None, unassigned_ok=False
+) -> IncidentRef | None:
     """Resolve the request's incident with a customer message, or file one already resolved.
 
     `describe()` returns the AllocationUpdate, or raises UnsupportedUpdate -- then nothing is sent,
     so an open incident stays open for an admin. An incident that is already Resolved or Closed is
     left alone: `comments` is a journal, so re-posting would duplicate the message.
 
-    A resolved incident always has an assignee. `assignee()`, if given, returns a UTLN to assign it
-    to over any assignee it has (admin_request_approver), or None. Otherwise requests are opened
-    unassigned, so one still unassigned is assigned to TICKETING_ASSIGNED_TO as it is resolved, and
-    one an admin has picked up keeps its assignee. A UTLN ServiceNow doesn't know is logged, and
-    TICKETING_ASSIGNED_TO stands in.
+    Who it's assigned to: `assignee()`, if given, returns a UTLN to assign it to over any assignee it
+    has (admin_request_approver), or None. Otherwise an incident someone has picked up keeps its
+    assignee, and one still unassigned, or filed now, goes to `default_assignee()`, the admin
+    responsible (e.g. whoever approved the request), if given and not None. Failing that it goes to
+    TICKETING_ASSIGNED_TO, or with `unassigned_ok` is left unassigned. A UTLN ServiceNow doesn't know
+    is logged and treated as no one.
 
     Unlike open_ticket this always asks ServiceNow, for the incident's current state; the
     incident is recorded as a FiledTicket as for open_ticket.
@@ -162,8 +171,14 @@ def resolve_or_file(slot: TicketSlot, *, people, describe, assignee=None) -> Inc
     if chosen:
         chosen = known_user(client, chosen, slot.what)
 
+    def responsible():
+        return default_assignee() if default_assignee else None
+
     if existing:
-        assignment = {"assigned_to": chosen} if chosen else default_assignment(existing)
+        if chosen:
+            assignment = {"assigned_to": chosen}
+        else:
+            assignment = default_assignment(client, existing, responsible(), slot.what, unassigned_ok=unassigned_ok)
         client.update_incident(existing.sys_id, {**assignment, **resolution})
         logger.info("Resolved %s for %s", existing.number, slot.what)
         incident = existing
@@ -174,7 +189,7 @@ def resolve_or_file(slot: TicketSlot, *, people, describe, assignee=None) -> Inc
             short_description=update.short_description,
             u_business_service=update.business_service,
             u_action=update.u_action,
-            assigned_to=chosen or known_user(client, None, slot.what),
+            assigned_to=chosen or known_user(client, responsible(), slot.what, unassigned_ok=unassigned_ok),
             correlation_id=slot.correlation_id,
             **resolution,
         )

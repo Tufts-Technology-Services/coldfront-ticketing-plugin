@@ -171,7 +171,7 @@ def resolve_hpc_account_failure_ticket(username: str) -> IncidentRef | None:
     client.update_incident(
         existing.sys_id,
         {
-            **default_assignment(existing),
+            **default_assignment(client, existing, None, failure.what),
             **resolution_fields("Setting up the HPC account succeeded on a later attempt."),
         },
     )

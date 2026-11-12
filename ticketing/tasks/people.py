@@ -89,6 +89,13 @@ def request_approver(request, approved_status) -> str | None:
     return approver
 
 
+def ticketing_admin_username(user_pk) -> str | None:
+    """The UTLN of user `user_pk` if they're a ticketing admin (ticketing.permissions); else None,
+    as for no user. An admin's own changes are theirs to be assigned; anyone else's are no one's."""
+    user = get_user_model().objects.filter(pk=user_pk).first() if user_pk else None
+    return user.username if user and is_ticketing_admin(user) else None
+
+
 def admin_request_approver(request, approved_status) -> str | None:
     """The approver's UTLN (request_approver) if a ticketing admin submitted `request`; else None.
 

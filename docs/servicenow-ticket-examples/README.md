@@ -20,11 +20,18 @@ text.
 - The **caller** (Affected Client) is the project's PI on every allocation and project ticket,
   whoever asked. The PI is also on the watch list unless they're the contact person, so they still
   hear. The admin-only failure tickets are the exception: their caller is the admin.
-- A ticket **opened** with no assignee waits New in the queue for someone to pick it up. A ticket
-  **filed resolved** is a notice: it is created already resolved, assigned to the ColdFront service
-  account (shown as `svc_rcrm`), only so that ServiceNow emails the message.
-- When ColdFront resolves a ticket, it assigns the ticket to the service account only if no one has
-  picked it up.
+- A ticket **opened** by ColdFront has no assignee: it waits New in the queue for someone to pick it
+  up. A ticket **filed resolved** is a notice, created already resolved so that ServiceNow emails
+  the message.
+- **Who a resolved ticket is assigned to.** A ticket someone picked up keeps them. Otherwise:
+  - an allocation request or change request goes to the admin who activated or approved it, and a
+    storage failure ticket to the admin who approved its request;
+  - a project user notice goes to whoever changed the project's users if they're an RCRM admin, and
+    is otherwise left unassigned (shown as "no one");
+  - a duplicate ColdFront closes when a ServiceNow ticket is linked goes to the admin who linked it;
+  - anything else goes to the ColdFront service account, the `TICKETING_ASSIGNED_TO` setting (shown
+    as `svc_rcrm (TICKETING_ASSIGNED_TO)`): HPC account tickets, and the cases above when ColdFront
+    can't tell who the admin was or ServiceNow doesn't know them.
 
 ## People in the examples
 
@@ -35,7 +42,7 @@ text.
 | jdoe01 | Jordan Doe | Signs up for an HPC account |
 | slee05 | Sam Lee | Added to the project |
 | privera04 | Pat Rivera | RT admin who activates allocations and approves changes |
-| svc_rcrm | | ColdFront's ServiceNow service account |
+| svc_rcrm | | ColdFront's ServiceNow service account, the `TICKETING_ASSIGNED_TO` setting |
 
 ## The tickets
 
