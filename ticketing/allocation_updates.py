@@ -51,6 +51,9 @@ WINDOWS_PATH_ATTRIBUTE_NAME = "Storage Path (Windows)"
 # The storage plugin's group attribute (its GROUP_ATTRIBUTE_NAME default), on the allocation or else
 # the project. A course's admin group is this name plus ADMIN_GROUP_SUFFIX (create_course_folders).
 GROUP_ATTRIBUTE_NAME = "Group"
+# The project attribute naming a project in a word (a slug, set when Tufts' project is created); storage
+# short descriptions end with it, or with the project's title where there's none.
+PROJECT_KEY_ATTRIBUTE_NAME = "Project Key"
 ADMIN_GROUP_SUFFIX = "admin"
 
 
@@ -265,7 +268,7 @@ def describe_request(change, requestor) -> RequestDescription:
     quota_change = _quota_change(change)
 
     if resource_type == "Storage" and quota_change:
-        summary = f"Quota Change Request | {quota_change.new_value} {QUOTA_UNITS} | {path}"
+        summary = f"Quota Change Request | {quota_change.new_value} {QUOTA_UNITS} | {project_key_or_title(allocation.project)}"
     else:
         summary = f"Allocation Change Request | {allocation.project.title}"
 
@@ -341,6 +344,17 @@ def _previous_value(attribute, new_value):
     return None
 
 
+def project_key_or_title(project) -> str:
+    """The project's Project Key attribute, or its title if it has none: how a storage short
+    description names the project."""
+    key = (
+        project.projectattribute_set.filter(proj_attr_type__name=PROJECT_KEY_ATTRIBUTE_NAME)
+        .values_list("value", flat=True)
+        .first()
+    )
+    return key or project.title
+
+
 def _storage(change, resource) -> AllocationUpdate:
     quota_change = _quota_change(change)
     new_quota = f"{quota_change.new_value} {QUOTA_UNITS}"
@@ -361,7 +375,7 @@ def _storage(change, resource) -> AllocationUpdate:
         "path": path,
         "windows_path": windows_path,
     }
-    parts = [f"{resource.name}: Quota Change", new_quota, path or allocation.project.title]
+    parts = [f"{resource.name}: Quota Change", new_quota, project_key_or_title(allocation.project)]
     return AllocationUpdate(
         short_description=clean_short_description(" | ".join(p for p in parts if p)),
         comments=_render("allocation_update", resource, context),
@@ -389,7 +403,7 @@ def _storage_activation(allocation, resource) -> AllocationUpdate:
         "group": group,
         "admin_group": f"{group}{ADMIN_GROUP_SUFFIX}" if group else None,
     }
-    parts = [f"{resource.name}: New Allocation", quota, path or allocation.project.title]
+    parts = [f"{resource.name}: New Allocation", quota, project_key_or_title(allocation.project)]
     return AllocationUpdate(
         short_description=clean_short_description(" | ".join(p for p in parts if p)),
         comments=_render("allocation_new", resource, context),

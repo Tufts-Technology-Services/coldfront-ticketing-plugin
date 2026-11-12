@@ -110,10 +110,11 @@ def use_client(monkeypatch):
 
 def test_storage_quota_change_message(pi):
     change = make_storage_change(pi)
+    add_project_key(change.allocation.project, "smithlab")
     with capture_templates() as rendered:
         update = describe_change(change)
 
-    assert update.short_description == "Research Storage: Quota Change | 20 TB | /cluster/tufts/lab"
+    assert update.short_description == "Research Storage: Quota Change | 20 TB | smithlab"  # the key, not the path
     assert rendered.main == "ticketing/allocation_update/storage.txt"
     assert {partial_template("rcrm"), partial_template("charge_back"), partial_template("footer")} <= set(
         rendered.names
@@ -132,13 +133,14 @@ def test_an_rstore_quota_change_is_given_its_smb_and_windows_paths(pi):
     with capture_templates() as rendered:
         update = describe_change(change)
 
-    assert update.short_description == f"Tier 1 RStore: Quota Change | 20 TB | {RSTORE_SMB_PATH}"
+    assert RSTORE_SMB_PATH not in update.short_description
     context = rendered.context("ticketing/allocation_update/storage.txt")
     assert (context["path"], context["windows_path"]) == (RSTORE_SMB_PATH, RSTORE_WINDOWS_PATH)
 
 
-def test_a_quota_change_with_neither_path_ends_with_the_project(pi):
-    change = make_storage_change(pi, path=None)
+@pytest.mark.parametrize("path", ["/cluster/tufts/lab", None])
+def test_a_quota_change_without_a_project_key_ends_with_the_project(pi, path):
+    change = make_storage_change(pi, path=path)
 
     update = describe_change(change)
 
@@ -555,6 +557,7 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
     quota = change.allocationattributechangerequest_set.get().allocation_attribute
     quota.value = "10"
     quota.save()
+    add_project_key(change.allocation.project, "smithlab")
     snow = use_client(FakeServiceNow())
 
     with capture_templates() as rendered:
@@ -564,7 +567,7 @@ def test_request_opens_an_active_incident_for_admins(pi, requestor, use_client):
     assert incident.number == "INC0000001"
     assert ticket["state"] is None  # left for the instance to choose
     assert ticket["assigned_to"] is None  # waits in the group queue
-    assert ticket["short_description"] == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
+    assert ticket["short_description"] == "Research Storage: Quota Change Request | 20 TB | smithlab"
     assert ticket["caller_id"] == "asmith02" and ticket["u_contact_person"] == "jdoe01"
     assert ticket["watch_list"] == ["asmith02"]
     assert ticket["u_business_service"] == "Research Data Storage"
@@ -715,7 +718,8 @@ def test_a_private_quota_still_names_the_quota_in_the_short_description(pi, requ
 
     request = describe_request(change, requestor)
 
-    assert request.short_description == "Research Storage: Quota Change Request | 20 TB | /cluster/tufts/lab"
+    title = change.allocation.project.title  # no Project Key, so the title
+    assert request.short_description == f"Research Storage: Quota Change Request | 20 TB | {title}"
     assert "Storage Quota (TB)" not in request.description
 
 
@@ -764,6 +768,15 @@ def test_activation_without_an_incident_files_a_resolved_one(pi, use_client):
 
 RSTORE_SMB_PATH = "smb://rstore.it.tufts.edu/smith_lab$"
 RSTORE_WINDOWS_PATH = "\\\\rstore.it.tufts.edu\\smith_lab$"
+
+
+def add_project_key(project, value):
+    """Give `project` the Project Key project attribute, as Tufts' project creation does."""
+    f.ProjectAttributeFactory(
+        project=project,
+        proj_attr_type=f.ProjectAttributeTypeFactory(name="Project Key"),
+        value=value,
+    )
 
 
 def add_windows_path(allocation, value):
@@ -828,7 +841,16 @@ def test_a_new_rstore_allocation_lists_its_smb_paths_for_mac_and_windows(pi):
     assert RSTORE_SMB_PATH in update.comments and RSTORE_WINDOWS_PATH in update.comments
     assert update.comments.count(RSTORE_SMB_PATH) == 1  # listed once, as the Mac path
     assert "10 TB" in update.comments
-    assert update.short_description == f"Tier 1 RStore: New Allocation | 10 TB | {RSTORE_SMB_PATH}"
+    assert update.short_description == f"Tier 1 RStore: New Allocation | 10 TB | {allocation.project.title}"
+
+
+def test_a_new_storage_allocation_ends_with_its_project_key(pi):
+    allocation, _ = make_storage_allocation(pi, resource_name="Tier 1 RStore", path=RSTORE_SMB_PATH)
+    add_project_key(allocation.project, "smithlab")
+
+    update = describe_activation(allocation)
+
+    assert update.short_description == "Tier 1 RStore: New Allocation | 10 TB | smithlab"
 
 
 def test_a_new_rstore_allocation_without_a_windows_path_lists_only_the_mac_one(pi):
@@ -1007,7 +1029,7 @@ def test_the_latest_activation_is_the_one_that_counts(pi, ticketing_admin, admin
     assert people.admin_request_approver(allocation, "Active") == "admin02"
 
 
-def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, in_request, use_client):
+def test_a_customers_request_is_assigned_to_the_admin_who_activated_it(pi, requestor, admin, in_request, use_client):
     allocation = submitted_by(in_request, requestor, pi)
     set_status(in_request, admin, allocation, f.AllocationStatusChoiceFactory(name="Active"))
     snow = use_client(FakeServiceNow())
@@ -1015,7 +1037,39 @@ def test_a_customers_request_goes_to_the_service_account(pi, requestor, admin, i
     tasks.resolve_allocation_ticket(allocation.pk)
 
     [(_, ticket)] = snow.incidents.values()
-    assert ticket["assigned_to"] == "svc_test"
+    assert ticket["assigned_to"] == "admin01"
+
+
+def customer_change_with_open_incident(pi, requestor, admin, in_request, snow, assigned_to=None):
+    """A change request `requestor` submitted and `admin` approved, with ColdFront's incident still open."""
+    in_request(requestor)
+    change = make_storage_change(pi)
+    set_status(in_request, admin, change, f.AllocationChangeStatusChoiceFactory(name="Approved"))
+    cid = f"coldfront:allocation-change:{change.pk}"
+    snow.incidents[cid] = (IncidentRef("i-9", "INC0000009", "1", assigned_to=assigned_to), {})
+    return change, cid
+
+
+def test_a_customers_change_is_assigned_to_the_admin_who_approved_it(pi, requestor, admin, in_request, use_client):
+    snow = use_client(FakeServiceNow())
+    change, cid = customer_change_with_open_incident(pi, requestor, admin, in_request, snow)
+
+    tasks.resolve_allocation_change_ticket(change.pk)
+
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert fields["assigned_to"] == "admin01"
+
+
+def test_a_customers_request_someone_picked_up_keeps_its_assignee(pi, requestor, admin, in_request, use_client):
+    snow = use_client(FakeServiceNow())
+    change, cid = customer_change_with_open_incident(pi, requestor, admin, in_request, snow, "u-someone")
+
+    tasks.resolve_allocation_change_ticket(change.pk)
+
+    _, fields = snow.incidents[cid]
+    assert fields["state"] == "6"
+    assert "assigned_to" not in fields  # left with whoever picked it up
 
 
 def test_without_history_users_there_is_no_approver(pi):

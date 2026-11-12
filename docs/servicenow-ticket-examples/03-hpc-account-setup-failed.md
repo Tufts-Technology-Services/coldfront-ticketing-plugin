@@ -15,8 +15,8 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 | Field | Value |
 |---|---|
 | Short description | HPC Account Setup Failed \| jdoe01 |
-| Caller (not emailed) | svc_rcrm |
-| Contact person (emailed) | svc_rcrm |
+| Caller (not emailed) | svc_rcrm (`TICKETING_ASSIGNED_TO`) |
+| Contact person (emailed) | svc_rcrm (`TICKETING_ASSIGNED_TO`) |
 | Source (contact_type) | monitoring |
 | Business service | High Performance Computing (HPC) |
 | Action | Activate/Setup/Install |
@@ -53,7 +53,7 @@ Setting up the HPC account failed again: Could not create home directory /cluste
 
 | Field | Value |
 |---|---|
-| Assigned to | svc_rcrm |
+| Assigned to | svc_rcrm (`TICKETING_ASSIGNED_TO`) |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | Setting up the HPC account succeeded on a later attempt. |

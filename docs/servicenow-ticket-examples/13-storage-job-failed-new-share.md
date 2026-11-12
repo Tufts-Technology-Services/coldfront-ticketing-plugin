@@ -63,7 +63,7 @@ Share creation failed again: failed: VAST API timed out creating /cluster/tufts/
 
 | Field | Value |
 |---|---|
-| Assigned to | svc_rcrm |
+| Assigned to | privera04 |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | Share creation succeeded on a later attempt. |

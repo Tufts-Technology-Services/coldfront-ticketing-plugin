@@ -215,9 +215,14 @@ place and files nothing.
   `email` when someone else (in practice an admin) files on their behalf. Membership is tested
   directly, because ColdFront's `project.has_perm()` is true for every superuser. It's always sent:
   left unset, ServiceNow records `phone`.
-- **Assignee:** request tickets open unassigned, waiting in the assignment group's queue. Anything
-  resolved needs an assignee, so a resolve assigns `TICKETING_ASSIGNED_TO` if no one has picked it
-  up, or the approving admin for an admin's request.
+- **Assignee:** request tickets open unassigned, waiting in the assignment group's queue. A ticket
+  someone has picked up keeps its assignee when ColdFront resolves it, except an admin's own request,
+  which goes to the approving admin. Otherwise the assignee is the admin responsible: whoever
+  activated or approved an allocation or change request (also for a storage failure ticket resolved
+  by a later success), and whoever linked a ServiceNow ticket, for the duplicate that closes. A project
+  user notice goes to whoever made the change if they're a ticketing admin, and is otherwise left
+  unassigned. Everything else, and these when the admin can't be found or ServiceNow doesn't know
+  them, goes to the service account, `TICKETING_ASSIGNED_TO`: HPC account tickets, mainly.
 
 ## Ticketing admins
 

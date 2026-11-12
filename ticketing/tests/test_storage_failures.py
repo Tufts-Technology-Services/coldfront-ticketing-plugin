@@ -172,7 +172,7 @@ def test_success_resolves_the_failure_ticket(pi, requestor, admin, in_request, s
 
     incident, fields = failure_of(snow, f"coldfront:allocation:{allocation.pk}")
     assert incident.state == "6"
-    assert fields["assigned_to"] == "svc_test"
+    assert fields["assigned_to"] == "admin01"  # who activated the allocation
     assert fields["close_notes"] == "Share creation succeeded on a later attempt."
     assert FiledTicket.objects.get(kind=FiledTicket.Kind.STORAGE_FAILURE).resolved_at is not None
 

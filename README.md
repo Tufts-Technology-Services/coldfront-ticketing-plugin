@@ -41,9 +41,9 @@ with the change.
 | Event | Signal | Sender | Action |
 |---|---|---|---|
 | New allocation request | `allocation_new` | `AllocationCreateView` | Create incident, unless a ticketing admin submitted it |
-| Share created | `share_creation_successful` | the storage task | Resolve the allocation's incident (assigned to the approver if a ticketing admin requested it) |
+| Share created | `share_creation_successful` | the storage task | Resolve the allocation's incident (assigned to the admin who approved it) |
 | New allocation change request | `allocation_change_created` | `AllocationChangeView` | Create incident, unless a ticketing admin submitted it |
-| Quota changed | `quota_update_successful` | the storage task | Resolve the change request's incident (assigned to the approver if a ticketing admin requested it) |
+| Quota changed | `quota_update_successful` | the storage task | Resolve the change request's incident (assigned to the admin who approved it) |
 | Storage job failed | `share_creation_failed`, `quota_update_failed` | the storage task | File an admin-only child of the request's incident; a later success resolves it |
 | Allocation activated, or change approved | `allocation_activate`, `allocation_change_approved` | `AllocationDetailView`, `AllocationChangeDetailView` | If storage won't provision it (non-Storage resources; Storage changes with no quota change), resolve the request's incident with a generic message. Otherwise nothing, unless the approving admin's switch is off (see below) |
 | Project users added or removed | `project_activate_user`, `project_remove_user` | any | File a resolved notice for the PI and Approvers, once per project per day |
@@ -114,7 +114,8 @@ import os
 INSTALLED_APPS += ["ticketing"]
 
 TICKETING_ENABLE_SIGNALS = True
-TICKETING_ASSIGNED_TO = "<service-account-utln>"  # assignee of resolved tickets
+# Assignee of resolved tickets no admin is responsible for (HPC accounts), or whose admin isn't known
+TICKETING_ASSIGNED_TO = "<service-account-utln>"
 # What ticket text calls this site ("Review in ColdFront: ..."); default "ColdFront".
 # TICKETING_SITE_NAME = "RCRM"
 # Tickets show attribute names like slurm_account_name as words ("Slurm account name"), writing

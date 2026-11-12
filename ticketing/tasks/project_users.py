@@ -1,5 +1,8 @@
 """Already-resolved notices about a project's users: one generic notice per project per day when its
-users change, for the PI and Approvers, and one to each user added, telling them about it."""
+users change, for the PI and Approvers, and one to each user added, telling them about it.
+
+No admin approves these changes, so a notice is assigned to whoever made the change only if they're
+a ticketing admin (ticketing_admin_username), and otherwise left unassigned: never the service account."""
 
 import logging
 
@@ -24,6 +27,7 @@ from ticketing.tasks.filing import (
 from ticketing.tasks.people import (
     is_owner_or_approver,
     people_fields,
+    ticketing_admin_username,
 )
 from ticketing.text import render_ticket_text
 from ticketing.tickets import (
@@ -65,6 +69,8 @@ def create_project_users_ticket(project_pk: int, requestor_pk: int | None = None
             business_service="Research Data Storage",
             u_action=U_ACTION_MOVE_ADD_CHANGE,
         ),
+        default_assignee=lambda: ticketing_admin_username(requestor_pk),
+        unassigned_ok=True,
     )
 
 
@@ -90,7 +96,7 @@ def create_project_user_added_ticket(project_pk: int, user_pk: int, requestor_pk
         slot,
         people=lambda: added_user_people(project, user, requestor_pk),
         describe=lambda: AllocationUpdate(
-            short_description=clean_short_description(f"Added to Project | {project.title}"),
+            short_description=clean_short_description(f"Added to Project | {project.title} | {user.username}"),
             comments=render_ticket_text(
                 "ticketing/project_user_added_notification.txt",
                 {"project": project, "added_by": named_adder(project, requestor_pk)},
@@ -99,6 +105,8 @@ def create_project_user_added_ticket(project_pk: int, user_pk: int, requestor_pk
             business_service="Research Data Storage",
             u_action=U_ACTION_MOVE_ADD_CHANGE,
         ),
+        default_assignee=lambda: ticketing_admin_username(requestor_pk),
+        unassigned_ok=True,
     )
 
 

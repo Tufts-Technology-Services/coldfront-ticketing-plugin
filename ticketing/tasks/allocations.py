@@ -22,6 +22,7 @@ from ticketing.tasks.filing import (
 from ticketing.tasks.people import (
     admin_request_approver,
     people_fields,
+    request_approver,
 )
 
 
@@ -49,8 +50,9 @@ def resolve_allocation_ticket(allocation_pk: int, requestor_pk: int | None = Non
     the generic one; an allocation with no resource is left open for an admin. Queued on storage
     success, or on activation when storage won't provision it. With no incident to resolve, a
     new one is filed already resolved. `requestor_pk` only matters then -- without it the PI is the
-    contact person as well as the caller. If a ticketing admin submitted the request, it is assigned
-    to the admin who activated it (admin_request_approver). Safe to re-run.
+    contact person as well as the caller. It is assigned to the admin who activated it
+    (request_approver), unless someone else picked it up first; if a ticketing admin submitted the
+    request, to the activating admin regardless (admin_request_approver). Safe to re-run.
     """
     slot = AllocationTicketSlot.load(allocation_pk)
     return resolve_or_file(
@@ -58,6 +60,7 @@ def resolve_allocation_ticket(allocation_pk: int, requestor_pk: int | None = Non
         people=lambda: people_fields(slot.allocation.project, requestor_pk),
         describe=lambda: describe_activation(slot.allocation),
         assignee=lambda: admin_request_approver(slot.request, slot.approved_status),
+        default_assignee=lambda: request_approver(slot.request, slot.approved_status),
     )
 
 
@@ -84,8 +87,9 @@ def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: in
     a quota change, else the generic one listing what changed; an allocation with no resource is left
     open for an admin. Queued on storage success, or on approval when storage won't apply it. With no
     incident to resolve, a new one is filed already resolved. `requestor_pk` only matters then --
-    without it the PI is the contact person as well as the caller. If a ticketing admin submitted
-    the request, it is assigned to the admin who approved it (admin_request_approver). Safe to re-run.
+    without it the PI is the contact person as well as the caller. It is assigned to the admin who
+    approved it (request_approver), unless someone else picked it up first; if a ticketing admin
+    submitted the request, to the approving admin regardless (admin_request_approver). Safe to re-run.
     """
     slot = AllocationTicketSlot.load(None, allocation_change_pk)
     return resolve_or_file(
@@ -93,4 +97,5 @@ def resolve_allocation_change_ticket(allocation_change_pk: int, requestor_pk: in
         people=lambda: people_fields(slot.allocation.project, requestor_pk),
         describe=lambda: describe_change(slot.request),
         assignee=lambda: admin_request_approver(slot.request, slot.approved_status),
+        default_assignee=lambda: request_approver(slot.request, slot.approved_status),
     )

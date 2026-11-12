@@ -97,9 +97,10 @@ def test_unassigned_ticket_is_left_for_the_group_queue():
     assert payload["assignment_group"] == "<sys_user_group.name=TTS Research Technology>"
 
 
-def test_a_ticket_filed_resolved_needs_an_assignee():
-    with pytest.raises(ValueError, match="needs assigned_to"):
-        make(assigned_to=None, state="6")
+def test_a_ticket_can_be_filed_resolved_without_an_assignee():
+    payload = to_payload(make(assigned_to=None, state="6"), fake_resolve)
+
+    assert "assigned_to" not in payload and payload["state"] == "6"
 
 
 def test_update_resolves_references_and_fits_long_text():

@@ -38,8 +38,9 @@ record nothing.
 
 Create tasks (open_ticket) file an admin-facing description, and leave state and assigned_to unset
 so the incident opens New in the assignment group's queue. Resolve tasks (resolve_or_file) post a
-customer-facing message as a comment and resolve, assigning the incident to TICKETING_ASSIGNED_TO if
-no one has picked it up; with no incident to resolve they file one already resolved. Allocation
+customer-facing message as a comment and resolve, assigning the incident, if no one has picked it up,
+to the admin responsible (see resolve_or_file), or else TICKETING_ASSIGNED_TO; with no incident to
+resolve they file one already resolved. Allocation
 messages are chosen by resource (ticketing.allocation_updates), with a generic message for
 resources that have none of their own; only an allocation with no resource is left open for an
 admin.

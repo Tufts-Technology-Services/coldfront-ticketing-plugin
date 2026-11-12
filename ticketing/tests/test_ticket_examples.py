@@ -23,7 +23,7 @@ from coldfront.core.utils import mail
 from ticketing import client as servicenow
 from ticketing import tasks
 from ticketing.client import INCIDENT_TABLE, ServiceNowClient
-from ticketing.tests.test_allocation_updates import add_group, add_member, add_windows_path
+from ticketing.tests.test_allocation_updates import add_group, add_member, add_project_key, add_windows_path
 from ticketing.tickets import STATE_ACTIVE, STATE_CLOSED, STATE_RESOLVED
 
 pytestmark = pytest.mark.django_db
@@ -65,6 +65,8 @@ FIELD_LABELS = {
     "close_code": "Close code",
     "close_notes": "Close notes",
 }
+# Shown for a ticket filed already resolved with no one assigned, where the row would otherwise be missing.
+NO_ASSIGNEE = "no one"
 OPENED_NEW = "Opened with no state, so ServiceNow starts it New in the group's queue."
 OPENED_ACTIVE = "Opened with no state but an assignee, so ServiceNow starts it Active."
 NOTHING_EMAILED = "Nothing customer-visible: no one is emailed."
@@ -120,6 +122,9 @@ class RecordingServiceNow(ServiceNowClient):
 
 
 def table_value(key, value):
+    if value == SERVICE_ACCOUNT:
+        # Name the setting, so a reader can tell the fallback from a person.
+        return f"{value} (`TICKETING_ASSIGNED_TO`)"
     if key == "watch_list":
         value = value.replace(",", ", ")
     elif key == "state":
@@ -138,6 +143,8 @@ def render_step(heading, action, sent, state):
     if action == "create" and "state" not in fields:
         fields["state"] = state
         parts.append(OPENED_ACTIVE if state == STATE_ACTIVE else OPENED_NEW)
+    elif action == "create" and "assigned_to" not in fields:
+        fields["assigned_to"] = NO_ASSIGNEE
     rows = [f"| {label} | {table_value(key, fields[key])} |" for key, label in FIELD_LABELS.items() if key in fields]
     if rows:
         parts.append("\n".join(["| Field | Value |", "|---|---|", *rows]))
@@ -184,10 +191,11 @@ class Cast:
         self.member = make_person("slee05", "Sam", "Lee")
         self.admin = make_person("privera04", "Pat", "Rivera", is_superuser=True)
 
-    def project(self, title="Smith Lab"):
-        """Project 1, with the PI on it as a Manager (as ColdFront adds them) and the Approver."""
+    def project(self, title="Smith Lab", key="smithlab"):
+        """Project 1, with its Project Key, and the PI on it as a Manager (as ColdFront adds them) and the Approver."""
         project = f.ProjectFactory(title=title, pi=self.pi)
         assert project.pk == 1, "the pages' links say project 1"
+        add_project_key(project, key)
         for user in (self.pi, self.approver):
             add_member(project, user.username)
         return project
@@ -198,6 +206,7 @@ class Cast:
         quota,
         *,
         project_title="Smith Lab",
+        project_key="smithlab",
         path=None,
         windows_path=None,
         group=None,
@@ -210,7 +219,7 @@ class Cast:
             name=resource_name, resource_type=f.ResourceTypeFactory(name="Storage"), requires_payment=requires_payment
         )
         allocation = f.AllocationFactory(
-            project=self.project(project_title),
+            project=self.project(project_title, project_key),
             status=f.AllocationStatusChoiceFactory(name="New"),
             justification=justification,
         )
@@ -361,6 +370,7 @@ def new_course_tier_1_hpc(snow, cast):
         "Course - Tier 1 HPC",
         "1",
         project_title="BIO 101 Fall 2026",
+        project_key="bio101_fall2026",
         path="/cluster/tufts/bio101",
         group="bio101",
         requires_payment=False,

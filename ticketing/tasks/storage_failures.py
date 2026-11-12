@@ -114,7 +114,8 @@ def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int
     """Resolve a storage job's failure ticket once the job has succeeded; no-op if there's none open.
 
     Queued alongside the request's own resolve, only when a failure ticket is recorded and not yet
-    resolved (see ticketing.signals). Assigned to TICKETING_ASSIGNED_TO if no one picked it up.
+    resolved (see ticketing.signals). Assigned, if no one picked it up, to the admin who approved the
+    request (request_approver), else TICKETING_ASSIGNED_TO.
     """
     request = AllocationTicketSlot.load(allocation_pk, allocation_change_pk)
     failure = request.storage_failure()
@@ -124,7 +125,12 @@ def resolve_storage_failure_ticket(allocation_pk: int, allocation_change_pk: int
         return existing
     client.update_incident(
         existing.sys_id,
-        {**default_assignment(existing), **resolution_fields(f"{request.job} succeeded on a later attempt.")},
+        {
+            **default_assignment(
+                client, existing, request_approver(request.request, request.approved_status), failure.what
+            ),
+            **resolution_fields(f"{request.job} succeeded on a later attempt."),
+        },
     )
     logger.info("Resolved %s for %s", existing.number, failure.what)
     record_filed(existing, failure, resolved=True)

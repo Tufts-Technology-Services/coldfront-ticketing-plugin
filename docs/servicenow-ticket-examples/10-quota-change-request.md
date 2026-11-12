@@ -14,7 +14,7 @@ Opened with no state, so ServiceNow starts it New in the group's queue.
 
 | Field | Value |
 |---|---|
-| Short description | Tier 1 HPC: Quota Change Request \| 20 TB \| /cluster/tufts/smithlab |
+| Short description | Tier 1 HPC: Quota Change Request \| 20 TB \| smithlab |
 | Caller (not emailed) | asmith02 |
 | Contact person (emailed) | bjones03 |
 | Watch list (emailed) | asmith02 |

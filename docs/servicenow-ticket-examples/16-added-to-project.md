@@ -16,7 +16,7 @@ Nothing is sent to people who are removed, to the PI, or to ticketing admins.
 
 | Field | Value |
 |---|---|
-| Short description | Added to Project \| Smith Lab |
+| Short description | Added to Project \| Smith Lab \| slee05 |
 | Caller (not emailed) | asmith02 |
 | Contact person (emailed) | slee05 |
 | Source (contact_type) | self-service |
@@ -25,7 +25,7 @@ Nothing is sent to people who are removed, to the PI, or to ticketing admins.
 | Category | Research |
 | Subcategory | Research Systems |
 | Assignment group | TTS Research Technology |
-| Assigned to | svc_rcrm |
+| Assigned to | no one |
 | State | Resolved (6) |
 | Close code | Solved Remotely (Permanently) |
 | Close notes | User added to project. |
@@ -43,8 +43,6 @@ Tier 1 RStore (https://rtguides.it.tufts.edu/storage/systems/20-tier1-rstore.htm
 Tier 2 Research (https://rtguides.it.tufts.edu/storage/systems/30-tier2.html#access-method-globus)
 
 Research Computing Resource Manager (RCRM): The RCRM is now available at https://rcrm.it.tufts.edu/, providing owners and approvers with self-service tools to manage user access, request research storage quota adjustment, and update billing information for tiered research storage charge-backs. Please see the Research Technology Guides RCRM for detailed instructions. https://rtguides.it.tufts.edu/storage/rcrm/index.html
-
-NOTE: Only RT can access and move data to/from Tier 3. 
 
 Interested in a quick demo? Go to the link below to schedule an RCRM consultation to learn how to make the most of these self-service features.
 https://outlook.office.com/book/RDMSSupport@tufts.edu
