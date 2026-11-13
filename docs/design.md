@@ -104,6 +104,11 @@ one outcome; a retry it schedules for itself sends nothing until it finishes. Th
 the allocation attributes the storage plugin records its state in, which also let a hand edit of one
 resolve a ticket; now only a storage job can.
 
+A quota reaches the storage system only through an approved change request: the storage plugin's
+attribute edit page shows the quota read-only, with a link to make a change request. So every quota
+change has an incident to resolve, and a quota set with no approved change request asking for it
+(changed in the Django admin, say) is logged and resolves nothing.
+
 ### What the storage plugin doesn't provision
 
 Allocations on other resource types, and Storage change requests that don't change the quota (an
@@ -121,7 +126,8 @@ A failure (`share_creation_failed` or `quota_update_failed`) files a child of th
 (ServiceNow's `parent` field), with only the approving admin on it, as caller and contact person,
 so no customer is emailed or sees it. (It's the one allocation ticket whose caller isn't the PI.) Its
 text is internal: what failed, the reason the storage plugin gave, and the project and resource,
-not how to fix it. There's one per request: a repeat
+not how to fix it (a quota update on an allocation whose share was never created fails with
+`no share`, filed against the change request). There's one per request: a repeat
 failure adds a work note (reopening the ticket if it was resolved), and the success that resolves
 the request resolves the failure ticket too.
 
