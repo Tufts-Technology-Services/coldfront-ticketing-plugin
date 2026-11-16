@@ -239,8 +239,9 @@ def storage_job_request(allocation_pk, *, quota):
     """The request a storage job carried out: (change_pk, correlation_id, resolve task, its pk), or None.
 
     A share was created for the allocation's own request; a quota set, for the approved change request
-    that asked for the quota now in place. None when there's no such request, as for a quota edited
-    directly (AllocationAttributeEditView), which has no ticket.
+    that asked for the quota now in place. None when there's no such request: the storage plugin updates
+    a quota only for an approved change request (its attribute edit page shows the quota read-only), so
+    that means the quota was changed outside ColdFront's pages, in the Django admin or a shell, say.
     """
     if not quota:
         return (
@@ -291,8 +292,9 @@ def storage_job_failed(allocation_pk, message, *, quota):
 def applied_quota_change_pk(allocation_pk):
     """The approved change request that set the allocation's current quota, or None.
 
-    The newest approved request whose requested quota is the value now in place. None when the quota
-    was edited directly (AllocationAttributeEditView), which has no change request or ticket.
+    The newest approved request whose requested quota is the value now in place. None when no approved
+    request asked for it: the quota was changed outside ColdFront's pages (the storage plugin's attribute
+    edit page shows it read-only), which has no change request or ticket.
     """
     quota = AllocationAttribute.objects.filter(
         allocation_id=allocation_pk, allocation_attribute_type__name=QUOTA_ATTRIBUTE_NAME
